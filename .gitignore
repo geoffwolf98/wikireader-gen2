@@ -1,0 +1,4 @@
+build/
+device/build/
+*.o
+*.d

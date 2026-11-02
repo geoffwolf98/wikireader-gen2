@@ -1,0 +1,86 @@
+WikiReader Gen2 @VERSION@
+==========================
+New software for the Openmoko WikiReader that reads current Wikipedia
+(Kiwix ZIM) files.
+
+You need
+--------
+* An Openmoko WikiReader
+* A microSD card formatted FAT32 (8 GB or larger recommended). Cards over
+  32 GB are usually sold as exFAT and must be reformatted to FAT32 first.
+* A separate card: this is the software for the card, nothing inside the
+  WikiReader is changed. Your original card keeps working.
+
+Install
+-------
+1. Format the card as FAT32 (one partition, Master Boot Record).
+   Windows: cards up to 32 GB can be formatted in Explorer (FAT32).
+   Linux:   sudo mkfs.vfat -F 32 /dev/sdX1
+   macOS:   Disk Utility, "MS-DOS (FAT)", Master Boot Record.
+2. Copy all the files and folders to the top (root) of the card, keeping
+   the folders as they are (extract them first if you downloaded a zip).
+   The card should then hold kernel.elf, init.app, WIKIFONT.BIN,
+   ZWSTATE.DAT and one folder per wiki (e.g. ENPEDIA).
+3. Eject the card safely, put it in the WikiReader and switch on.
+4. The first start of each wiki shows "Preparing" and its name for a few
+   seconds. This only happens once.
+
+Updating an existing card
+-------------------------
+Copy only init.app (and kernel.elf and WIKIFONT.BIN if they changed) over
+the old ones. Keep ZWSTATE.DAT and the .HIS and .EXT files in the wiki
+folders: they hold your place and history. ZWSTATE.DAT is only for a new
+card.
+
+Using it
+--------
+SEARCH          search screen, as you left it (press again to clear)
+HISTORY         short press: Back.  Hold: list of recent articles
+RANDOM          random article
+Type            results update as you type, tap one to open it
+                (drag the results to put the keyboard away, tap the
+                search bar to bring it back; 123 for digits)
+Drag            scroll (flick to scroll faster)
+Tap a link      open it (links have a dotted underline)
+Tap the page    toolbar: Back, List (sections), Top, Prev, Next
+Bottom left     tap the corner of an article to go Back
+Wiki name       tap it on the empty search screen to switch wiki
+Footnotes, Citations
+                switches on the empty search screen (tap to turn on or
+                off; used from the next article). On: [a] and [1] markers
+                in the text and the Notes and References lists at the
+                end. Tap a marker to jump to its note, ^ to jump back
+Power           saves your place and switches off (also after 2 minutes)
+
+Adding other wikis
+------------------
+Any Kiwix ZIM can be added (Wikipedia, Wiktionary, Wikivoyage...), up to
+32 wikis per card. Always prepare it on a PC with zimprep (in the source
+package) and copy the folder it makes to the card. Do not copy .zim files
+to the card directly. Full instructions are in the README.md inside the
+source package.
+
+Problems
+--------
+* The WikiReader shows its contrast menu, as if there were no card: some
+  microSD cards are not recognised by the WikiReader's built-in loader.
+  Try a different make of card.
+* "No card": the card is not FAT32, or the card type is not supported.
+  Try another card. Known to work: SanDisk Extreme PRO 64 GB (A2),
+  SanDisk Ultra PLUS 200 GB (U1).
+  Not recognised: Gigastone 128 GB (A1).
+* "No wiki found": the wiki folder is missing or nested in another folder.
+  It must be at the top of the card, e.g. MATHS/MATHS.IDX.
+
+Feedback
+--------
+This is a test release and feedback is very welcome: @FEEDBACK@
+Please say which wiki and article, what you did, and what happened.
+A photo of the screen helps a lot. The version is shown at the bottom
+of the search screen.
+
+Licence and source
+------------------
+@SOURCE@
+kernel.elf is grifo from the Openmoko WikiReader project (GPL v3,
+https://github.com/wikireader/wikireader).

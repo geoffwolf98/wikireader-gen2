@@ -1,6 +1,6 @@
 # zimwiki: ZIM reader firmware for the Openmoko WikiReader
 
-Version 1.0.33 (released as *WikiReader Gen2*). The version and build date
+Version 1.0.34 (released as *WikiReader Gen2*). The version and build date
 are shown at the bottom of the search screen; `zimprep --version` prints
 it for the PC tool.
 
@@ -422,6 +422,7 @@ now and then, or grifo's watchdog resets the unit after 20 s.
 * 1.0.31: explanatory notes are shown: a Notes section (reference lists with a group, from {{efn}} and {{notelist}}) appears at the end of the article, while citation lists stay hidden. Headings left with nothing under them (a Notes section of citations only, a gallery) are dropped.
 * 1.0.32: two switches on the empty search screen, kept in ZWSTATE.DAT: Footnotes (explanatory notes: [a] markers and the Notes list, lettered a. b. c.) and Citations ([1] markers and the References list). Both are off by default, which is the plain text of 1.0.30. When on, tapping a marker jumps to its note and the ^ in front of a note jumps back to the marker; Back returns each time.
 * 1.0.33: keyboard in the style of the original firmware: three rows of ten 28 px keys (QWERTYUIOP / ASDFGHJKL← / ZXCV space BNM 123), light keys on a dark board with bold capital labels, each key's touch area its whole cell. Go and the hide key are gone: tap a result, and drag the results to put the keyboard away.
+* 1.0.34: no code changes: example paths in the mkroot instructions made generic (~/release/...).
 * 1.0.13: saves write only the data (a few KB) over the existing file instead of rewriting all 64 KB: quicker and much less writing to the card.
 * 1.0.12: the device never grows or recreates a save file (a cut-off save left an empty file that froze the next save); a failed save is not retried in a loop (that kept the unit awake); device logging no longer uses the unreliable printf.
 * 1.0.11: zimprep makes each wiki's NAME.HIS and NAME.EXT in advance, and the release has an empty ZWSTATE.DAT: creating files on a nearly full card made the WikiReader freeze or go blank (its FAT code searches the whole card for free space).

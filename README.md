@@ -1,6 +1,6 @@
 # zimwiki: ZIM reader firmware for the Openmoko WikiReader
 
-Version 1.0.40 (released as *WikiReader Gen2*). The version and build date
+Version 1.0.41 (released as *WikiReader Gen2*). The version and build date
 are shown at the bottom of the search screen; `zimprep --version` prints
 it for the PC tool.
 
@@ -108,8 +108,10 @@ files. `rm -rf build && make` always rebuilds everything.
 ZIMs come from <https://library.kiwix.org> (browse) or
 <https://download.kiwix.org/zim/> (direct). Choose **nopic** where there is
 one: full text without images, which the WikiReader cannot show anyway.
-*maxi* has images (wasted space), *mini* has only the introduction of each
-article.
+*maxi* (full text with images) works as well when it is the newer dump:
+`zimprep --recluster` leaves the pictures out, so it comes out about the
+size of the nopic one (the download is bigger). *mini* has only the
+introduction of each article.
 
 `tools/getzims.sh` finds the newest English ZIM of each project and its
 size, and downloads them (with aria2c when installed: several connections
@@ -145,8 +147,12 @@ This writes `MATHS.IDX` (the search index) and `MATHS.Z00`, `MATHS.Z01`...
   about 1 MB, which is most of the time it takes to open a page. It uses
   all CPU cores. Kiwix's full text search indexes (Xapian, often several
   GB) are left out, as the WikiReader has its own title index;
-  `--keep-fulltext` keeps them. Without `--recluster` the ZIM is only
-  split (minutes instead of hours, but slower page opening).
+  `--keep-fulltext` keeps them. So are the pictures (and redirects to
+  them), which the WikiReader cannot show: the remaining entries are
+  renumbered, and the ZIM's lists and the WikiReader's index with them;
+  `--keep-images` keeps them. Without `--recluster` the ZIM is only
+  split (minutes instead of hours, but slower page opening), pictures
+  and all.
 * Time: minutes for the small wikis; one to a few hours for the full
   English Wikipedia (it prints the time of each stage).
 * Other options: `--chunk-mb N`, `--level N` (zstd level, default 19),
@@ -431,6 +437,7 @@ now and then, or grifo's watchdog resets the unit after 20 s.
 * 1.0.38: Sci calculator tab: sin cos tan and their inverses (2nd), ln, log, e^x and 10^x (2nd), square root, x², x³, 1/x, x^y, x!, π, e, EXP (1.5E-3), DEG/RAD. 2nd changes the outlined keys for one press. sin 30 is 0.5 and tan 90 is "Math error" in degrees; sin π is 0 in radians. The mode and the angle unit are kept in ZWSTATE.DAT. The maths functions are written in src/calc.c (the device has no maths library) and checked against the PC's on 1.1 million values (worst error 1.7e-14, far below the ten digits shown); 300 sums give identical results on the emulated WikiReader.
 * 1.0.39: power off (or auto power off) with the calculator open came back on the search screen instead of the article underneath, so RANDOM then gave a random article. The screen under the calculator is now saved. New test for it (PC and emulated).
 * 1.0.40: a button press could be ignored after the device had slept: grifo stops the timer behind the app's clock while the CPU sleeps, so the next press looked like contact bounce of the last release (within 80 ms on the stopped clock). Most visible as RANDOM not leaving the calculator after holding RANDOM to open it, but SEARCH and HISTORY could miss a press the same way. The app now stays awake for the 80 ms after a release. zimwiki-headless now stops its clock too whenever the app would sleep (ZW_CLOCK_RUNS=1 for the old behaviour); new test for it.
+* 1.0.41: zimprep --recluster leaves pictures out by default (and redirects to them), so a "maxi" ZIM gives about the same card files as a "nopic" one; --keep-images keeps them. The entries are renumbered, with the ZIM's title lists (X/listing/titleOrdered), redirects, main page and the WikiReader's index to match; metadata (the Kiwix icon) stays. Checked with libzim (integrity check, every entry by path, redirects, listings) on old and new style ZIMs, and the index gives the same article for every title as before. The test climate wiki shrinks from 8.8 to 6.5 MB. Only zimprep changed (init.app only by its version number). Source tarballs 1.0.35 to 1.0.40 held a stray Python wheel (zstandard...whl) by mistake; removed.
 * 1.0.13: saves write only the data (a few KB) over the existing file instead of rewriting all 64 KB: quicker and much less writing to the card.
 * 1.0.12: the device never grows or recreates a save file (a cut-off save left an empty file that froze the next save); a failed save is not retried in a loop (that kept the unit awake); device logging no longer uses the unreliable printf.
 * 1.0.11: zimprep makes each wiki's NAME.HIS and NAME.EXT in advance, and the release has an empty ZWSTATE.DAT: creating files on a nearly full card made the WikiReader freeze or go blank (its FAT code searches the whole card for free space).

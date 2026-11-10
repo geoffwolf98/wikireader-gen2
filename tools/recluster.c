@@ -243,6 +243,17 @@ static int is_search_index(const zim_dirent_t *d)
 	return 0;
 }
 
+static int mime_is(const zim_t *z, uint16_t mime, const char *prefix)
+{
+	return mime < z->nmime && !strncmp(z->mime[mime], prefix, strlen(prefix));
+}
+
+/* X/listing/titleOrdered/v0, v1: arrays of entry numbers (uint32) */
+static int is_listing(const zim_t *z, uint16_t mime)
+{
+	return mime < z->nmime && !strcmp(z->mime[mime], "application/octet-stream+zimlisting");
+}
+
 typedef struct ref {
 	uint32_t cluster, blob, entry;
 } ref_t;
@@ -317,9 +328,13 @@ static void progress(const char *what, uint64_t done, uint64_t total)
 }
 
 int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, int level,
-	      int threads, int keep_fulltext, uint64_t *out_size, uint32_t *out_chunks)
+	      int threads, int keep_fulltext, int keep_images, uint32_t **out_map,
+	      uint32_t *out_entries, uint64_t *out_size, uint32_t *out_chunks)
 {
 	uint32_t dropped = 0;
+	uint32_t *map = NULL;		/* old entry -> new, ZIM_NONE: left out */
+	uint32_t nentries = z->entry_count, npics = 0, npicredir = 0;
+	uint8_t *listing = NULL;	/* per entry: a title listing blob */
 	cw_t w;
 	ref_t *refs;
 	uint32_t nrefs = 0, i, nclusters = 0, cap_clusters = 1024;
@@ -349,10 +364,52 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 	cluster_off = malloc(sizeof(uint64_t) * cap_clusters);
 
 	t_start = t_stage = time(NULL);
+	listing = calloc(z->entry_count ? z->entry_count : 1, 1);
+	/* 0. pictures, and redirects that end at one, are left out (the
+	 * WikiReader shows no pictures); the rest are renumbered in order,
+	 * which keeps the URL order the ZIM format requires */
+	if (!keep_images) {
+		uint32_t next = 0;
+		map = malloc(sizeof(uint32_t) * (z->entry_count ? z->entry_count : 1));
+		for (i = 0; i < z->entry_count; ++i) {
+			zim_dirent_t d;
+			map[i] = 0;
+			/* articles' pictures (C/..., or I/... in old ZIMs);
+			 * metadata (the Kiwix icon, M/Illustration...) stays */
+			if (zim_dirent(z, i, &d) == 0 && d.ns != 'M' &&
+			    d.mime != ZIM_MIME_REDIRECT && d.mime != ZIM_MIME_LINKTARGET &&
+			    d.mime != ZIM_MIME_DELETED && mime_is(z, d.mime, "image/")) {
+				map[i] = ZIM_NONE;
+				npics++;
+			}
+		}
+		for (i = 0; i < z->entry_count; ++i) {
+			zim_dirent_t d, t;
+			uint32_t final;
+			if (zim_dirent(z, i, &d) == 0 && d.mime == ZIM_MIME_REDIRECT &&
+			    zim_follow(z, i, &final, &t) == 0 && final < z->entry_count &&
+			    map[final] == ZIM_NONE) {
+				map[i] = ZIM_NONE;
+				npicredir++;
+			}
+		}
+		for (i = 0; i < z->entry_count; ++i)
+			map[i] = map[i] == ZIM_NONE ? ZIM_NONE : next++;
+		nentries = next;
+		if (!npics && !npicredir) {
+			free(map);
+			map = NULL;
+		}
+	}
+
 	/* 1. which entries use which blob, in cluster order */
 	for (i = 0; i < z->entry_count; ++i) {
 		zim_dirent_t d;
 		new_cluster[i] = new_blob[i] = ZIM_NONE;
+		if (map && map[i] == ZIM_NONE)
+			continue;
+		if (zim_dirent(z, i, &d) == 0 && d.mime < z->nmime && is_listing(z, d.mime))
+			listing[i] = 1;
 		if (zim_dirent(z, i, &d) == 0 && d.cluster != ZIM_NONE && !keep_fulltext &&
 		    is_search_index(&d)) {
 			new_cluster[i] = ZIM_NONE - 1;	/* gets an empty blob below */
@@ -422,6 +479,20 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 			blob_len[nblobs] = len;
 			blob_data[nblobs] = malloc(len ? len : 1);
 			memcpy(blob_data[nblobs], p, len);
+			if (map && listing[refs[i].entry]) {
+				/* title listing: renumber, leaving out removed
+				 * entries */
+				uint32_t k2, n2 = 0;
+				for (k2 = 0; k2 + 4 <= len; k2 += 4) {
+					uint32_t e = zw_rd32(blob_data[nblobs] + k2);
+					if (e < z->entry_count && map[e] != ZIM_NONE) {
+						zw_wr32(blob_data[nblobs] + n2, map[e]);
+						n2 += 4;
+					}
+				}
+				len = n2;
+				blob_len[nblobs] = len;
+			}
 			new_cluster[refs[i].entry] = nclusters + (uint32_t)njobs;
 			new_blob[refs[i].entry] = nblobs;
 			nblobs++;
@@ -490,6 +561,9 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 	if (dropped)
 		fprintf(stderr, "left out %u full text search index entr%s (not used by the WikiReader)\n",
 			dropped, dropped == 1 ? "y" : "ies");
+	if (npics || npicredir)
+		fprintf(stderr, "left out %u picture%s and %u redirect%s to them (the WikiReader shows no pictures; --keep-images keeps them)\n",
+			npics, npics == 1 ? "" : "s", npicredir, npicredir == 1 ? "" : "s");
 	(void)raw_cap;
 
 	/* 3. assemble: header, MIME list, pointer lists, dirents,
@@ -505,28 +579,52 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 	cw_write(&w, pos, z->mime_buf, (size_t)mime_len);
 	pos += mime_len;
 	url_ptr_pos = pos;
-	pos += (uint64_t)z->entry_count * 8;
+	pos += (uint64_t)nentries * 8;
 	title_ptr_pos = pos;
 	{
-		/* titles keep their order: copy the list */
+		/* titles keep their order: copy the list (renumbered, without
+		 * the entries left out) */
 		uint8_t *tl = malloc((size_t)z->entry_count * 4 + 1);
 		zw_io_read(&z->io, z->title_ptr_pos, tl, z->entry_count * 4);
-		cw_write(&w, pos, tl, (size_t)z->entry_count * 4);
+		if (map) {
+			uint32_t n2 = 0;
+			for (i = 0; i < z->entry_count; ++i) {
+				uint32_t e = zw_rd32(tl + (size_t)i * 4);
+				if (e < z->entry_count && map[e] != ZIM_NONE)
+					zw_wr32(tl + (size_t)(n2++) * 4, map[e]);
+			}
+			if (n2 != nentries) {
+				fprintf(stderr, "zimprep: title list has %u of %u entries\n", n2, nentries);
+				exit(1);
+			}
+		}
+		cw_write(&w, pos, tl, (size_t)nentries * 4);
 		free(tl);
 	}
-	pos += (uint64_t)z->entry_count * 4;
+	pos += (uint64_t)nentries * 4;
 	dirent_pos = pos;
 	{
-		uint8_t *ptrs = malloc((size_t)z->entry_count * 8 + 1);
+		uint8_t *ptrs = malloc((size_t)nentries * 8 + 1);
 		for (i = 0; i < z->entry_count; ++i) {
-			uint32_t n = read_dirent(z, i, dbuf, sizeof(dbuf));
-			uint16_t mt = zw_rd16(dbuf);
+			uint32_t n, ni = map ? map[i] : i;
+			uint16_t mt;
+			if (ni == ZIM_NONE)
+				continue;
+			n = read_dirent(z, i, dbuf, sizeof(dbuf));
+			mt = zw_rd16(dbuf);
 			if (mt != ZIM_MIME_REDIRECT && mt != ZIM_MIME_LINKTARGET && mt != ZIM_MIME_DELETED) {
 				zw_wr32(dbuf + 8, new_cluster[i]);
 				zw_wr32(dbuf + 12, new_blob[i]);
+			} else if (mt == ZIM_MIME_REDIRECT && map) {
+				uint32_t t = zw_rd32(dbuf + 8);
+				if (t >= z->entry_count || map[t] == ZIM_NONE) {
+					fprintf(stderr, "zimprep: redirect %u to a removed entry\n", i);
+					exit(1);
+				}
+				zw_wr32(dbuf + 8, map[t]);
 			}
-			zw_wr32(ptrs + (size_t)i * 8, (uint32_t)pos);
-			zw_wr32(ptrs + (size_t)i * 8 + 4, (uint32_t)(pos >> 32));
+			zw_wr32(ptrs + (size_t)ni * 8, (uint32_t)pos);
+			zw_wr32(ptrs + (size_t)ni * 8 + 4, (uint32_t)(pos >> 32));
 			cw_write(&w, pos, dbuf, n);
 			pos += n;
 			if ((i & 0x3fff) == 0)
@@ -534,7 +632,7 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 		}
 		progress("writing entries", z->entry_count, z->entry_count);
 		stage_done("writing entries");
-		cw_write(&w, url_ptr_pos, ptrs, (size_t)z->entry_count * 8);
+		cw_write(&w, url_ptr_pos, ptrs, (size_t)nentries * 8);
 		free(ptrs);
 	}
 	(void)dirent_pos;
@@ -579,14 +677,14 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 	zw_wr16(hdr + 4, z->major);
 	zw_wr16(hdr + 6, z->minor);
 	memcpy(hdr + 8, z->uuid, 16);
-	zw_wr32(hdr + 24, z->entry_count);
+	zw_wr32(hdr + 24, nentries);
 	zw_wr32(hdr + 28, nclusters);
 #define W64(o, v) do { zw_wr32(hdr + (o), (uint32_t)(v)); zw_wr32(hdr + (o) + 4, (uint32_t)((uint64_t)(v) >> 32)); } while (0)
 	W64(32, url_ptr_pos);
 	W64(40, title_ptr_pos);
 	W64(48, cluster_ptr_pos);
 	W64(56, 80);
-	zw_wr32(hdr + 64, z->main_page);
+	zw_wr32(hdr + 64, map && z->main_page < z->entry_count ? map[z->main_page] : z->main_page);
 	zw_wr32(hdr + 68, 0xffffffffu);
 	W64(72, pos);
 	cw_write(&w, 0, hdr, 80);
@@ -618,8 +716,11 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 	*out_size = pos;
 	*out_chunks = (uint32_t)((pos + ((uint64_t)1 << shift) - 1) >> shift);
 	fprintf(stderr, "reclustered: %u entries, %u clusters of ~%u KiB, %llu bytes (was %llu)\n",
-		z->entry_count, nclusters, target_kb, (unsigned long long)pos,
+		nentries, nclusters, target_kb, (unsigned long long)pos,
 		(unsigned long long)z->io.size);
+	*out_map = map;
+	*out_entries = nentries;
+	free(listing);
 	free(new_cluster);
 	free(new_blob);
 	free(refs);

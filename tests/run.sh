@@ -43,29 +43,89 @@ for z in $zims; do
 	# 3. recluster, still a valid ZIM with identical content
 	if [ $have_libzim = 1 ]; then
 		rm -rf "$T/rc"
-		$B/zimprep --recluster 64 --level 3 --keep-fulltext "$z" "$T/rc" > /dev/null 2>&1
+		$B/zimprep --recluster 64 --level 3 --keep-fulltext --keep-images "$z" "$T/rc" > /dev/null 2>&1
 		cat "$T"/rc/WIKI.Z* > "$T/rc.zim"
 		python3 tests/refdump.py "$T/rc.zim" > "$T/rc.txt"
 		python3 -c "from libzim.reader import Archive; import sys; sys.exit(0 if Archive('$T/rc.zim').check() else 1)" \
 			&& cmp -s "$T/ref.txt" "$T/rc.txt" && ok "recluster: $n" || bad "recluster: $n"
-		# default: search indexes left out, everything else identical
+		# default: search indexes and pictures (and redirects to them) left
+		# out, the rest renumbered; everything else identical, found by path
 		rm -rf "$T/rc2"
 		$B/zimprep --recluster 64 --level 3 "$z" "$T/rc2" > /dev/null 2>&1
 		cat "$T"/rc2/WIKI.Z* > "$T/rc2.zim"
-		python3 -c "
+		python3 - "$z" "$T/rc2.zim" <<'PY' && ok "recluster without search index, pictures: $n" || bad "recluster without search index, pictures: $n"
+import struct, sys
 from libzim.reader import Archive
-import sys
-a, b = Archive('$z'), Archive('$T/rc2.zim')
-ok = b.check() and a.entry_count == b.entry_count
-for i in range(a.entry_count):
-    x, y = a._get_entry_by_id(i), b._get_entry_by_id(i)
-    if x.path != y.path: ok = False; break
-    if x.is_redirect: continue
-    p = x.path.split('/')[-2:] if '/' in x.path else [x.path]
-    idx = x.path.startswith(('X/fulltext/', 'X/title/', 'fulltext/', 'title/', 'Z/'))
-    if idx: ok = ok and y.get_item().size == 0
-    elif bytes(x.get_item().content) != bytes(y.get_item().content): ok = False; break
-sys.exit(0 if ok else 1)" && ok "recluster without search index: $n" || bad "recluster without search index: $n"
+def dirents(path):
+    f = open(path, 'rb'); h = f.read(80)
+    n = struct.unpack('<I', h[24:28])[0]; up = struct.unpack('<Q', h[32:40])[0]
+    f.seek(up); ptrs = struct.unpack('<%dQ' % n, f.read(8 * n)); out = []
+    for p in ptrs:
+        f.seek(p); d = f.read(1024); mime = struct.unpack('<H', d[:2])[0]
+        o = 12 if mime == 0xffff else (8 if mime >= 0xfffd else 16)
+        out.append((chr(d[3]), d[o:d.index(b'\0', o)].decode('utf-8', 'replace'), mime))
+    return out
+A, B = sys.argv[1], sys.argv[2]
+a, b = Archive(A), Archive(B)
+da, db = dirents(A), dirents(B)
+ib = {d[:2]: i for i, d in enumerate(db)}
+def picture(arch, i, d):
+    if d[2] >= 0xfffd or d[0] == 'M':
+        return False
+    return arch._get_entry_by_id(i).get_item().mimetype.startswith('image/')
+ok = b.check()
+for i, d in enumerate(da):
+    key = d[:2]
+    x = a._get_entry_by_id(i)
+    gone = picture(a, i, d)
+    if d[2] == 0xffff:
+        t = x.get_redirect_entry()
+        gone = not t.is_redirect and t.get_item().mimetype.startswith('image/') and t.path.split('/')[0] != 'M'
+    if gone:
+        ok = ok and key not in ib
+        continue
+    if key not in ib:
+        ok = False
+        break
+    y = b._get_entry_by_id(ib[key])
+    if d[2] == 0xffff:
+        ok = ok and y.is_redirect and x.get_redirect_entry().path == y.get_redirect_entry().path
+    elif d[2] < 0xfffd:
+        idx = key[1].startswith(('fulltext/', 'title/')) and key[0] == 'X' or key[0] == 'Z'
+        listing = key[0] == 'X' and key[1].startswith('listing/')
+        if idx:
+            ok = ok and y.get_item().size == 0
+        elif not listing:
+            ok = ok and bytes(x.get_item().content) == bytes(y.get_item().content)
+    if not ok:
+        break
+sys.exit(0 if ok else 1)
+PY
+		# the search index after renumbering: every title still leads
+		# to the same article as in the index of the untouched ZIM
+		python3 - "$z" "$T/rc2.zim" "$T/prep/WIKI.IDX" "$T/rc2/WIKI.IDX" "$B/idxtest" <<'PY' && ok "index after renumbering: $n" || bad "index after renumbering: $n"
+import struct, subprocess, sys
+def dirents(path):
+    f = open(path, 'rb'); h = f.read(80)
+    n = struct.unpack('<I', h[24:28])[0]; up = struct.unpack('<Q', h[32:40])[0]
+    f.seek(up); ptrs = struct.unpack('<%dQ' % n, f.read(8 * n)); out = []
+    for p in ptrs:
+        f.seek(p); d = f.read(1024); mime = struct.unpack('<H', d[:2])[0]
+        o = 12 if mime == 0xffff else (8 if mime >= 0xfffd else 16)
+        out.append((chr(d[3]), d[o:d.index(b'\0', o)].decode('utf-8', 'replace')))
+    return out
+za, zb, xa, xb, tool = sys.argv[1:6]
+def records(idx, zim):
+    d = dirents(zim)
+    out = subprocess.run([tool, idx, '', '100000000'], capture_output=True, text=True).stdout
+    recs = []
+    for line in out.splitlines():
+        head, target = line.rsplit(' -> ', 1)
+        recs.append((head.split(' ', 1)[1].strip() if ' ' in head.strip() else head, d[int(target)]))
+    return recs
+ra, rb = records(xa, za), records(xb, zb)
+sys.exit(0 if ra and ra == rb else 1)
+PY
 	fi
 done
 

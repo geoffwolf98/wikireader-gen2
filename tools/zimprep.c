@@ -12,6 +12,10 @@
  *   --threads N   compression threads for --recluster (default: all CPUs)
  *   --keep-fulltext  keep Kiwix's Xapian search indexes when reclustering
  *                 (left out by default: large, slow, unused on the device)
+ *   --keep-images keep the pictures when reclustering (left out by
+ *                 default, with redirects to them: the WikiReader shows
+ *                 no pictures, so a "maxi" ZIM comes out about the size of
+ *                 a "nopic" one)
  *
  * Writes OUTDIR/NAME.IDX (title search index) and OUTDIR/NAME.Z00,
  * NAME.Z01, ... (the ZIM split into pieces FAT32 can hold).  Copy the
@@ -35,6 +39,15 @@
 #include "../host/hostio.h"
 #include "recluster.h"
 #include <unistd.h>
+
+/* recluster's renumbering (NULL: none), applied to the index */
+static uint32_t *g_map;
+static uint32_t g_entries;
+
+static uint32_t renum(uint32_t e)
+{
+	return g_map && e != ZIM_NONE ? g_map[e] : e;
+}
 
 typedef struct rec {
 	uint32_t key;		/* offset into key pool */
@@ -193,7 +206,7 @@ static void write_index(zim_t *z, const char *path, const char *name,
 		}
 		page[off] = r->tlen;
 		page[off + 1] = r->flags;
-		zw_wr32(page + off + 2, r->target);
+		zw_wr32(page + off + 2, renum(r->target));
 		memcpy(page + off + IDX_REC_HDR, titles.p + r->title, r->tlen);
 		off += need;
 		out++;
@@ -217,6 +230,7 @@ static void write_index(zim_t *z, const char *path, const char *name,
 			zim_dirent_t d;
 			if (zim_follow(z, z->main_page, &main_final, &d) < 0)
 				main_final = ZIM_NONE;
+			main_final = renum(main_final);
 		}
 		zw_wr32(hdr + IDX_H_MAGIC, IDX_MAGIC);
 		zw_wr32(hdr + IDX_H_VERSION, IDX_VERSION);
@@ -227,7 +241,7 @@ static void write_index(zim_t *z, const char *path, const char *name,
 		zw_wr32(hdr + IDX_H_SUM_OFF, sum_off);
 		zw_wr32(hdr + IDX_H_SUM_COUNT, sum_count);
 		memcpy(hdr + IDX_H_UUID, z->uuid, 16);
-		zw_wr32(hdr + IDX_H_ZIM_ENTRIES, z->entry_count);
+		zw_wr32(hdr + IDX_H_ZIM_ENTRIES, g_map ? g_entries : z->entry_count);
 		zw_wr32(hdr + IDX_H_CHUNKS, chunks);
 		hdr[IDX_H_CHUNK_SHIFT] = (uint8_t)shift;
 		zw_wr32(hdr + IDX_H_ZIM_SIZE, (uint32_t)zim_size);
@@ -312,7 +326,7 @@ int main(int argc, char **argv)
 {
 	const char *name = "WIKI", *input = NULL, *outdir = NULL;
 	uint32_t chunk_mb = 2048, shift, chunks, i;
-	int index_only = 0, a, r, level = 19, threads = 0, keep_fulltext = 0;
+	int index_only = 0, a, r, level = 19, threads = 0, keep_fulltext = 0, keep_images = 0;
 	uint32_t recluster_kb = 0;
 	host_files_t in;
 	zim_t z;
@@ -336,6 +350,8 @@ int main(int argc, char **argv)
 			level = atoi(argv[++a]);
 		else if (strcmp(argv[a], "--keep-fulltext") == 0)
 			keep_fulltext = 1;
+		else if (strcmp(argv[a], "--keep-images") == 0)
+			keep_images = 1;
 		else if (strcmp(argv[a], "--threads") == 0 && a + 1 < argc)
 			threads = atoi(argv[++a]);
 		else if (!input)
@@ -347,7 +363,7 @@ int main(int argc, char **argv)
 	}
 	if (!input || !outdir) {
 		fprintf(stderr, "usage: zimprep [-n NAME] [--chunk-mb N] [--index-only] [--recluster [KB]] [--level N]\n"
-			"               [--threads N] [--keep-fulltext] INPUT.zim OUTDIR\n"
+			"               [--threads N] [--keep-fulltext] [--keep-images] INPUT.zim OUTDIR\n"
 			"       zimprep --version\n");
 		return 2;
 	}
@@ -409,7 +425,8 @@ int main(int argc, char **argv)
 		snprintf(base, sizeof(base), "%s/%s", outdir, upname);
 		fprintf(stderr, "reclustering to %u KiB clusters, zstd level %d, %d threads\n",
 			recluster_kb, level, threads);
-		recluster(&z, base, shift, recluster_kb, level, threads, keep_fulltext, &size, &chunks);
+		recluster(&z, base, shift, recluster_kb, level, threads, keep_fulltext, keep_images,
+			  &g_map, &g_entries, &size, &chunks);
 		snprintf(path, sizeof(path), "%s/%s.IDX", outdir, upname);
 		write_index(&z, path, upname, chunks, shift, size);
 	} else {

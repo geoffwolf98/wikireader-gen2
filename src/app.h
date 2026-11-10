@@ -12,5 +12,8 @@ void app_describe(char *out, int cap);
 void app_init(void);
 void app_event(const void *plat_event);
 void app_settle(void);
+/* would the main loop keep running (1), or wait for an event, letting
+ * the device sleep with its timer stopped (0)? */
+int app_awake(void);
 
 #endif

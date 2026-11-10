@@ -112,6 +112,16 @@ bounce history
 expect back=0
 tap 15 200
 expect search "cli"
+hold random 700
+expect calc
+type 12+3x4=
+expect result=24 done
+tap 85 9
+expect sci
+type cs30)+r16)=
+expect result=4.5 done sci
+bounce random
+expect search "cli"
 restart
 expect search "cli"
 hold history 700
@@ -126,6 +136,12 @@ expect sections
 tap 60 30
 expect article
 button history
+expect article
+hold random 700
+expect sci
+type a/2=
+expect result=2.25 done
+button random
 expect article
 EOF
 	rm -rf "$T/state"
@@ -144,7 +160,62 @@ EOF
 			> "$T/emu2.txt" 2>&1 && ok "state kept over power off (emulated)" \
 			|| { bad "state kept over power off (emulated)"; tail -20 "$T/emu2.txt"; }
 	fi
+	# power off with the calculator open over an article: back to the
+	# article, and RANDOM leaves the calculator to it
+	cat > "$T/calc1.txt" <<'EOF2'
+type cli
+tap 60 30
+expect article
+hold random 700
+expect calc
+type 1+1=
+EOF2
+	cat > "$T/calc2.txt" <<'EOF2'
+expect article
+hold random 700
+expect calc
+button random
+expect article
+EOF2
+	{ cat "$T/calc1.txt"; echo restart; cat "$T/calc2.txt"; } > "$T/calc.txt"
+	rm -rf "$T/state"
+	$B/zimwiki-headless "$T/card.img" "$T/calc.txt" "$T/state" > "$T/calcapp.txt" 2>&1 \
+		&& ok "calculator over power off (PC build)" \
+		|| { bad "calculator over power off (PC build)"; cat "$T/calcapp.txt"; }
+	# presses after the device has slept (its timer stops then): each
+	# must count, not be taken for bounce of the last release
+	cat > "$T/sleep.txt" <<'EOF2'
+type cli
+tap 60 30
+wait 3000
+expect article
+hold random 700
+expect calc
+button random
+expect article
+hold random 700
+expect calc
+button history
+expect article
+button search
+expect search
+button search
+expect search ""
+EOF2
+	rm -rf "$T/state"
+	$B/zimwiki-headless "$T/card.img" "$T/sleep.txt" "$T/state" > "$T/sleepapp.txt" 2>&1 \
+		&& ok "buttons after sleep (PC build, timer stopped)" \
+		|| { bad "buttons after sleep (PC build, timer stopped)"; cat "$T/sleepapp.txt"; }
+	if [ -x build/c33emu ] && [ -f device/build/init.elf ]; then
+		rm -rf "$T/state"
+		build/c33emu device/build/init.elf "$T/card.img" "$T/calc1.txt" "$T/state" > "$T/calcemu.txt" 2>&1 &&
+		build/c33emu device/build/init.elf "$T/card.img" "$T/calc2.txt" "$T/state" >> "$T/calcemu.txt" 2>&1 \
+			&& ok "calculator over power off (emulated)" \
+			|| { bad "calculator over power off (emulated)"; tail -20 "$T/calcemu.txt"; }
+	fi
 fi
+
+$B/calctest > "$T/calc.txt" 2>&1 && ok "calculator core" || { bad "calculator core"; cat "$T/calc.txt"; }
 
 echo "$pass passed, $fail failed"
 [ $fail = 0 ]

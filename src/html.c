@@ -76,11 +76,13 @@ static int tag_void(int t)
 	return 0;
 }
 
-static int html_opts;	/* HTML_NOTES, HTML_CITES */
+static int html_opts;	/* HTML_NOTES, HTML_CITES (tested as a whole) */
+static int html_large;	/* HTML_LARGE: maths columns measured large */
 
 void html_set_options(int o)
 {
-	html_opts = o;
+	html_opts = o & (HTML_NOTES | HTML_CITES);
+	html_large = (o & HTML_LARGE) != 0;
 }
 
 static const char *const skip_classes[] = {
@@ -1000,6 +1002,8 @@ static void mx_measure(void *ctx, const char *s, uint32_t n, int style)
 		f = style & TEX_BOLD ? FONT_BOLD : FONT_TEXT;
 	else
 		f = style & TEX_BOLD ? FONT_BOLDITALIC : FONT_ITALIC;
+	if (html_large)
+		f = font_big(f);
 	*w += font_width(f, s, n);
 }
 

@@ -9,3 +9,11 @@ SMALL        bdf/small.bdf         small print, Liberation Sans 10px
 EXTRA        bdf/textipa.bdf       fallback: IPA, extended Latin/Greek (Junicode 15px)
 MATH         bdf/math.bdf          fallback: maths symbols (DejaVu Sans 13px, tools/ttf2bdf.py)
 MATHSMALL    bdf/mathsmall.bdf     maths symbols, Greek, Latin-1 for sub/superscripts (DejaVu Sans 10px)
+# large text set (the Text size switch), Liberation 2.1 via tools/ttf2bdf.py
+TEXTL        bdf/textl.bdf         body text large, Liberation Serif 18px
+BOLDL        bdf/textbl.bdf        bold large [tight]
+ITALICL      bdf/textil.bdf        italic large
+BOLDITALICL  bdf/textbil.bdf       bold italic large [tight]
+TITLEL       bdf/titlel.bdf        article title large, Liberation Sans Bold 23px
+HEADINGL     bdf/subtitlel.bdf     section headings large, Liberation Sans Bold 20px
+SMALLL       bdf/smalll.bdf        small print large, Liberation Sans 12px

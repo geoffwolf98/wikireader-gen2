@@ -13,12 +13,12 @@ THIRD := third_party/zstd/zstddeclib.c third_party/xz/xz_crc32.c \
          third_party/xz/xz_dec_stream.c third_party/xz/xz_dec_lzma2.c
 CORE  := src/zim.c src/fold.c src/index.c
 APP   := src/app.c src/library.c src/blockdev.c src/fat.c src/html.c \
-         src/layout.c src/font.c src/gfx.c src/tex.c fonts/fonts.c
+         src/layout.c src/font.c src/gfx.c src/tex.c src/calc.c fonts/fonts.c
 
 obj = $(patsubst %.c,$(BUILD)/%.o,$(1))
 
 TOOLS := $(BUILD)/zimprep $(BUILD)/zimcat
-TESTS := $(BUILD)/idxtest $(BUILD)/fattest $(BUILD)/textest
+TESTS := $(BUILD)/idxtest $(BUILD)/fattest $(BUILD)/textest $(BUILD)/calctest
 SIMS  := $(BUILD)/zimwiki-headless
 ifneq ($(SDL_LIBS),)
 SIMS  += $(BUILD)/zimwiki-sdl
@@ -35,6 +35,9 @@ $(BUILD)/idxtest: $(call obj,tests/idxtest.c src/index.c src/fold.c host/hostio.
 
 $(BUILD)/textest: $(call obj,tests/textest.c src/tex.c)
 	$(CC) -o $@ $^
+
+$(BUILD)/calctest: $(call obj,tests/calctest.c src/calc.c)
+	$(CC) -o $@ $^ -lm
 
 $(BUILD)/fattest: $(call obj,tests/fattest.c src/fat.c src/blockdev.c host/hostio.c)
 	$(CC) -o $@ $^

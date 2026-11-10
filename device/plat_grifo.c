@@ -137,12 +137,14 @@ int plat_load(const char *name, uint8_t **data, uint32_t *len)
 		unsigned long done = 0;
 		n = 0;
 		while (done < size) {
-			unsigned long k = size - done > 65536 ? 65536 : size - done;
+			unsigned long k = size - done > 16384 ? 16384 : size - done;
 			ssize_t r = file_read(h, *data + done, k);
 			if (r <= 0)
 				break;
 			done += (unsigned long)r;
 			plat_keepalive();
+			/* stage 4: loading a file (the app shows a spinner for the font) */
+			ZW_PROGRESS(4, (uint32_t)done, (uint32_t)size);
 		}
 		n = (ssize_t)done;
 	}

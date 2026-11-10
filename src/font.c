@@ -87,16 +87,37 @@ static void fill(const font_t *f, const uint8_t *r, glyph_t *g)
  * [ top, middle, bottom, ] top, middle, bottom, ( top, middle, bottom,
  * ) top, middle, bottom, |, || */
 #define PIECE_MAX_H 32
-static uint8_t piece_bits[14][PIECE_MAX_H];
-static int piece_h;
+static uint8_t piece_set[2][14][PIECE_MAX_H];	/* normal, large */
+static int piece_hs[2];
 
-static void make_pieces(void)
+int font_big(int f)
 {
-	int h = fonts[FONT_TEXT].ascent + fonts[FONT_TEXT].descent, k, y;
+	switch (f) {
+	case FONT_TEXT: return FONT_TEXTL;
+	case FONT_BOLD: return FONT_BOLDL;
+	case FONT_ITALIC: return FONT_ITALICL;
+	case FONT_BOLDITALIC: return FONT_BOLDITALICL;
+	case FONT_TITLE: return FONT_TITLEL;
+	case FONT_HEADING: return FONT_HEADINGL;
+	case FONT_SMALL: return FONT_SMALLL;
+	}
+	return f;
+}
+
+static int is_big(int f)
+{
+	return f >= FONT_TEXTL && f <= FONT_SMALLL;
+}
+
+static void make_pieces(int big)
+{
+	int base = big ? FONT_TEXTL : FONT_TEXT;
+	int h = fonts[base].ascent + fonts[base].descent, k, y;
+	uint8_t (*piece_bits)[PIECE_MAX_H] = piece_set[big];
 	if (h > PIECE_MAX_H)
 		h = PIECE_MAX_H;
-	piece_h = h;
-	memset(piece_bits, 0, sizeof(piece_bits));
+	piece_hs[big] = h;
+	memset(piece_bits, 0, sizeof(piece_set[big]));
 	for (y = 0; y < h; ++y) {
 		/* square brackets: bar plus a tick at the end */
 		for (k = 0; k < 3; ++k) {
@@ -130,14 +151,15 @@ void font_glyph(int fi, uint32_t cp, glyph_t *g)
 	const uint8_t *r;
 
 	if (cp >= FONT_PIECE && cp < FONT_PIECE + 14) {
-		if (!piece_h)
-			make_pieces();
-		g->bits = piece_bits[cp - FONT_PIECE];
+		int big = is_big(fi);
+		if (!piece_hs[big])
+			make_pieces(big);
+		g->bits = piece_set[big][cp - FONT_PIECE];
 		g->w = 4;
-		g->h = (uint8_t)piece_h;
+		g->h = (uint8_t)piece_hs[big];
 		g->adv = 5;
 		g->xoff = 0;
-		g->top = (int8_t)fonts[FONT_TEXT].ascent;
+		g->top = (int8_t)fonts[big ? FONT_TEXTL : FONT_TEXT].ascent;
 		return;
 	}
 	if (cp == 0x200a) {	/* hair space: 1 px, used to line up columns */
@@ -152,11 +174,17 @@ void font_glyph(int fi, uint32_t cp, glyph_t *g)
 		return;
 	}
 	/* sub and superscripts: small symbols before full size ones */
-	if (fi == FONT_SMALL && (r = find(&fonts[FONT_MATHSMALL], cp)) != NULL) {
+	if ((fi == FONT_SMALL || fi == FONT_SMALLL) &&
+	    (r = find(&fonts[FONT_MATHSMALL], cp)) != NULL) {
 		fill(&fonts[FONT_MATHSMALL], r, g);
 		return;
 	}
-	/* styled fonts fall back to the regular text font first */
+	/* styled fonts fall back to the regular text font first (the
+	 * large ones to the large regular font, then the normal one) */
+	if (is_big(fi) && fi != FONT_TEXTL && (r = find(&fonts[FONT_TEXTL], cp)) != NULL) {
+		fill(&fonts[FONT_TEXTL], r, g);
+		return;
+	}
 	if (fi != FONT_TEXT && (r = find(&fonts[FONT_TEXT], cp)) != NULL) {
 		fill(&fonts[FONT_TEXT], r, g);
 		return;

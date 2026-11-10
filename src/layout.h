@@ -61,6 +61,7 @@ typedef struct layout {
 	int32_t built_y;
 	int prev_kind;
 	int done;
+	uint8_t large;		/* drawn with the large font set */
 } layout_t;
 
 /* lay out the whole document */
@@ -70,6 +71,8 @@ int lay_build(layout_t *l, const doc_t *d);
  * what is laid out so far until done is set */
 int lay_begin(layout_t *l, const doc_t *d);
 int lay_more(layout_t *l, int32_t until_y, uint32_t max_blocks);
+/* font size for layouts begun from now on: 0 normal, 1 large */
+void lay_set_large(int on);
 void lay_free(layout_t *l);
 
 /* copy rows [top, top+rows) of the rendered document into buf

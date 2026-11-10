@@ -14,9 +14,11 @@
 #include "font.h"
 #include "gfx.h"
 #include "utf8.h"
+#include "calc.h"
 
 #define ROW_H       19
 #define BAR_H       20
+#define OPT2_DY     12	/* Text size switch: this far below the other two */
 #define KB_ROW_H    28	/* three rows like the original firmware's keyboard */
 #define KB_H        (3 * KB_ROW_H)
 #define KB_Y        (SCREEN_H - KB_H)
@@ -27,14 +29,16 @@
 #define SECT_MAX    160
 #define QUERY_MAX   120
 #define DRAG_START  7
-#define HOLD_MS     500	/* HISTORY held this long opens the list */
+#define HOLD_MS     500	/* HISTORY held this long opens the list,
+				   RANDOM held this long opens the calculator */
 #define CORNER      36	/* bottom left square that means back */
 /* grifo does not debounce the buttons: a light press can arrive as
  * down/up/down/up within a few tens of ms */
 #define BOUNCE_MS   80
+#define CALC_MAX    60	/* calculator expression length */
 #define POWER_OFF_MS (5u * 60u * 1000u)
 
-enum screen { S_MESSAGE, S_SEARCH, S_ARTICLE, S_HISTORY, S_LIBRARY, S_SECTIONS };
+enum screen { S_MESSAGE, S_SEARCH, S_ARTICLE, S_HISTORY, S_LIBRARY, S_SECTIONS, S_CALC };
 
 typedef struct hist_item {
 	uint32_t entry;
@@ -52,6 +56,8 @@ typedef struct back_item {
 
 static struct app {
 	uint8_t fb[SCREEN_H * SCREEN_STRIDE];
+	uint8_t shown[SCREEN_H * SCREEN_STRIDE];	/* last frame sent to the LCD */
+	uint8_t spin_buf[SCREEN_H * SCREEN_STRIDE];	/* shown + spinner */
 	int need_draw;
 	int screen;
 
@@ -66,7 +72,7 @@ static struct app {
 	char query[QUERY_MAX + 1];
 	int qlen;
 	int kb_visible, kb_layer;
-	int opts;		/* HTML_NOTES | HTML_CITES (the two switches) */
+	int opts;		/* HTML_NOTES | HTML_CITES | HTML_LARGE (the switches) */
 	int opt_y;		/* baseline of the switches line, 0 = not shown */
 	int search_dirty;
 	uint32_t res_pos;
@@ -121,8 +127,26 @@ static struct app {
 	uint32_t hist_down_ms;
 	int opening;		/* an article is being opened: show progress */
 	uint32_t open_t0, open_drawn;
+	int font_loading;	/* WIKIFONT.BIN being read: spinner top right */
+	uint32_t spin_t;
+	int spin_i;
 	int hist_up_pending;	/* released, waiting out contact bounce */
 	uint32_t hist_up_ms;
+	int rnd_down;		/* RANDOM pressed, not yet resolved */
+	uint32_t rnd_down_ms;
+	int rnd_up_pending;	/* released, waiting out contact bounce */
+	uint32_t rnd_up_ms;
+
+	/* calculator (RANDOM held) */
+	char calc_expr[CALC_MAX + 1];	/* ASCII: digits . + - * / % ( ) A */
+	int calc_len;
+	int calc_done;		/* = pressed: the result is shown */
+	int calc_err;		/* last = failed: CALC_ error code */
+	double calc_ans;	/* Ans, kept in ZWSTATE.DAT */
+	int calc_mode;		/* 0 Simple, 1 Sci (kept) */
+	int calc_rad;		/* angles in radians (kept; default degrees) */
+	int calc_2nd;		/* 2nd pressed: the next key is its other one */
+	int calc_ret;		/* screen to go back to */
 	struct {
 		uint8_t ignore;	/* this press was a bounce: drop its release */
 		uint8_t seen_up;
@@ -259,7 +283,30 @@ static void triangle_left(int x, int y, int size, int colour)
 
 static void present(void)
 {
+	memcpy(A.shown, A.fb, sizeof(A.shown));
 	plat_present(A.fb);
+}
+
+/* | / - \ in a small box at the top right, drawn over the last frame
+ * shown (the font is loaded in the middle of drawing the next one, so
+ * A.fb holds a half drawn screen) */
+static void spinner_step(void)
+{
+	/* | / - \ as drawn lines, all the same length: step (dx, dy) */
+	static const int8_t step[4][2] = { { 0, 1 }, { 1, -1 }, { 1, 0 }, { 1, 1 } };
+	int x = SCREEN_W - 15, y = 1, w = 14, h = 14, cx = x + 6, cy = y + 6, i;
+	uint32_t now = plat_ms();
+	if (A.spin_t && now - A.spin_t < 120)
+		return;
+	A.spin_t = now;
+	memcpy(A.spin_buf, A.shown, sizeof(A.spin_buf));
+	gfx_fill(A.spin_buf, SCREEN_STRIDE, SCREEN_H, x, y, w, h, WHITE);
+	gfx_rect(A.spin_buf, SCREEN_STRIDE, SCREEN_H, x, y, w, h, BLACK);
+	for (i = -4; i <= 4; ++i)
+		gfx_fill(A.spin_buf, SCREEN_STRIDE, SCREEN_H, cx + i * step[A.spin_i & 3][0],
+			 cy + i * step[A.spin_i & 3][1], 2, 2, BLACK);
+	A.spin_i++;
+	plat_present(A.spin_buf);
 }
 
 /* small box in the middle of the screen, drawn over whatever is there */
@@ -288,6 +335,11 @@ static void open_progress(int stage, uint32_t done, uint32_t total)
 	int x = 40, y = 134, w = SCREEN_W - 80;
 	char t[8];
 	plat_keepalive();
+	if (stage == 4) {
+		if (A.font_loading)
+			spinner_step();
+		return;
+	}
 	if (!A.opening || stage < 1 || stage > 3 || !total)
 		return;
 	now = plat_ms();
@@ -467,13 +519,26 @@ static void save_state(void)
 	memset(buf, 0, sizeof(buf));
 	zw_wr32(buf, STATE_MAGIC);
 	memcpy(buf + 4, A.lib.info.key, 9);
-	buf[13] = (uint8_t)(A.screen == S_ARTICLE ? S_ARTICLE : S_SEARCH);
+	{
+		/* in the calculator: the screen under it (it reopens there,
+		 * so RANDOM still goes back to the article after power off) */
+		int scr = A.screen == S_CALC ? A.calc_ret : A.screen;
+		buf[13] = (uint8_t)(scr == S_ARTICLE ? S_ARTICLE : S_SEARCH);
+	}
 	buf[14] = (uint8_t)(A.opts | 0x80);	/* switches; 0x80: set */
 	zw_wr32(buf + 16, A.have_article ? A.entry : 0xffffffffu);
 	zw_wr32(buf + 20, (uint32_t)A.scroll);
 	buf[24] = (uint8_t)ql;
 	memcpy(buf + 25, A.query, ql);
-	if (plat_save("ZWSTATE.DAT", buf, 25 + (uint32_t)ql) != 0)
+	{
+		/* calculator Ans at 200: "CALC" and the double (copied as
+		 * bytes: no unaligned access) */
+		memcpy(buf + 200, "CALC", 4);
+		memcpy(buf + 204, &A.calc_ans, sizeof(double));
+		buf[212] = (uint8_t)A.calc_mode;
+		buf[213] = (uint8_t)A.calc_rad;
+	}
+	if (plat_save("ZWSTATE.DAT", buf, 214) != 0)
 		zw_log("state not saved");
 	A.state_dirty = 0;	/* see save_history */
 	bd_invalidate();
@@ -1025,6 +1090,582 @@ static void draw_keyboard(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* calculator: RANDOM held opens it, RANDOM (or SEARCH, HISTORY) leaves.
+ * A row of mode tabs at the top (Simple, Sci), the expression and
+ * result below them, then the keys.  The expression is kept in the
+ * calculator's own ASCII form (see calc.h) and shown with symbols */
+
+#define CALC_TAB_H   18
+
+enum { CK_AC = 1, CK_DEL, CK_NEG, CK_EQ, CK_2ND, CK_DEG, CK_SQ, CK_CUBE, CK_RECIP,
+       CK_EXPE, CK_TENX };
+
+typedef struct calc_key {
+	uint8_t col, row, span;
+	const char *label;
+	uint8_t code;		/* expression char, or a CK_ code */
+	const char *label2;	/* with 2nd: another key (or NULL) */
+	uint8_t code2;
+} calc_key_t;
+
+typedef struct calc_layout {
+	const calc_key_t *keys;
+	int nkeys, cols, rows, col_w, row_h, key_y;
+	int expr_base, res_base, res_font;	/* display */
+} calc_layout_t;
+
+static const calc_key_t calc_simple[] = {
+	{ 0, 0, 1, "AC", CK_AC, 0, 0 }, { 1, 0, 1, "DEL", CK_DEL, 0, 0 },
+	{ 2, 0, 1, "(", '(', 0, 0 }, { 3, 0, 1, ")", ')', 0, 0 }, { 4, 0, 1, "\xc3\xb7", '/', 0, 0 },
+	{ 0, 1, 1, "7", '7', 0, 0 }, { 1, 1, 1, "8", '8', 0, 0 }, { 2, 1, 1, "9", '9', 0, 0 },
+	{ 3, 1, 1, "%", '%', 0, 0 }, { 4, 1, 1, "\xc3\x97", '*', 0, 0 },
+	{ 0, 2, 1, "4", '4', 0, 0 }, { 1, 2, 1, "5", '5', 0, 0 }, { 2, 2, 1, "6", '6', 0, 0 },
+	{ 3, 2, 1, "\xc2\xb1", CK_NEG, 0, 0 }, { 4, 2, 1, "\xe2\x88\x92", '-', 0, 0 },
+	{ 0, 3, 1, "1", '1', 0, 0 }, { 1, 3, 1, "2", '2', 0, 0 }, { 2, 3, 1, "3", '3', 0, 0 },
+	{ 3, 3, 1, "Ans", 'A', 0, 0 }, { 4, 3, 1, "+", '+', 0, 0 },
+	{ 0, 4, 2, "0", '0', 0, 0 }, { 2, 4, 1, ".", '.', 0, 0 }, { 3, 4, 2, "=", CK_EQ, 0, 0 },
+};
+
+#define SUP_M1 "\xe2\x81\xbb\xc2\xb9"	/* superscript -1 */
+static const calc_key_t calc_sci[] = {
+	{ 0, 0, 1, "2nd", CK_2ND, 0, 0 },
+	{ 1, 0, 1, "sin", 's', "sin" SUP_M1, 'S' },
+	{ 2, 0, 1, "cos", 'o', "cos" SUP_M1, 'O' },
+	{ 3, 0, 1, "tan", 't', "tan" SUP_M1, 'T' },
+	{ 4, 0, 1, "(", '(', 0, 0 }, { 5, 0, 1, ")", ')', 0, 0 },
+	{ 0, 1, 1, "DEG", CK_DEG, 0, 0 },	/* label shows DEG or RAD */
+	{ 1, 1, 1, "ln", 'l', "e\xcb\xa3", CK_EXPE },
+	{ 2, 1, 1, "log", 'g', "10\xcb\xa3", CK_TENX },
+	{ 3, 1, 1, "\xe2\x88\x9a", 'r', "x!", '!' },
+	{ 4, 1, 1, "x\xc2\xb2", CK_SQ, "x\xc2\xb3", CK_CUBE },
+	{ 5, 1, 1, "x\xca\xb8", '^', "x" SUP_M1, CK_RECIP },
+	{ 0, 2, 1, "7", '7', 0, 0 }, { 1, 2, 1, "8", '8', 0, 0 }, { 2, 2, 1, "9", '9', 0, 0 },
+	{ 3, 2, 1, "DEL", CK_DEL, 0, 0 }, { 4, 2, 1, "AC", CK_AC, 0, 0 },
+	{ 5, 2, 1, "\xcf\x80", 'p', 0, 0 },
+	{ 0, 3, 1, "4", '4', 0, 0 }, { 1, 3, 1, "5", '5', 0, 0 }, { 2, 3, 1, "6", '6', 0, 0 },
+	{ 3, 3, 1, "\xc3\x97", '*', 0, 0 }, { 4, 3, 1, "\xc3\xb7", '/', 0, 0 },
+	{ 5, 3, 1, "e", 'e', 0, 0 },
+	{ 0, 4, 1, "1", '1', 0, 0 }, { 1, 4, 1, "2", '2', 0, 0 }, { 2, 4, 1, "3", '3', 0, 0 },
+	{ 3, 4, 1, "+", '+', 0, 0 }, { 4, 4, 1, "\xe2\x88\x92", '-', 0, 0 },
+	{ 5, 4, 1, "EXP", 'E', 0, 0 },
+	{ 0, 5, 1, "0", '0', 0, 0 }, { 1, 5, 1, ".", '.', 0, 0 },
+	{ 2, 5, 1, "\xc2\xb1", CK_NEG, 0, 0 }, { 3, 5, 1, "Ans", 'A', 0, 0 },
+	{ 4, 5, 1, "%", '%', 0, 0 }, { 5, 5, 1, "=", CK_EQ, 0, 0 },
+};
+
+#define NELEM(a) ((int)(sizeof(a) / sizeof((a)[0])))
+static const calc_layout_t calc_layouts[2] = {
+	/* Simple: 5 x 5, 48 x 28 keys, large result */
+	{ calc_simple, NELEM(calc_simple), 5, 5, 48, 28, 68, 38, 62, FONT_TITLEL },
+	/* Sci: 6 x 6, 40 x 24 keys */
+	{ calc_sci, NELEM(calc_sci), 6, 6, 40, 24, 62, 34, 56, FONT_TITLE },
+};
+static const char *const calc_tabs[2] = { "Simple", "Sci" };
+static const int calc_tab_x[3] = { 0, 64, 106 };	/* tab edges */
+
+static const calc_layout_t *calc_lay(void)
+{
+	return &calc_layouts[A.calc_mode ? 1 : 0];
+}
+
+static int calc_flags(void)
+{
+	return A.calc_rad ? 0 : CALC_DEG;
+}
+
+static int calc_key_at(int x, int y)
+{
+	const calc_layout_t *L = calc_lay();
+	int i, col, row;
+	if (y < L->key_y || x < 0 || x >= SCREEN_W)
+		return -1;
+	col = x / L->col_w;
+	row = (y - L->key_y) / L->row_h;
+	if (row >= L->rows)
+		row = L->rows - 1;
+	for (i = 0; i < L->nkeys; ++i)
+		if (L->keys[i].row == row && col >= L->keys[i].col &&
+		    col < L->keys[i].col + L->keys[i].span)
+			return i;
+	return -1;
+}
+
+static void calc_enter(void)
+{
+	if (A.screen == S_CALC)
+		return;
+	A.calc_ret = A.screen;
+	A.screen = S_CALC;
+	A.calc_2nd = 0;
+	A.toolbar = 0;
+	A.vel = 0;
+	A.need_draw = 1;
+}
+
+static void calc_leave(void)
+{
+	if (A.screen != S_CALC)
+		return;
+	A.screen = A.calc_ret;
+	if (A.screen == S_ARTICLE && !A.have_article)
+		A.screen = S_SEARCH;
+	A.need_draw = 1;
+}
+
+static int calc_is_op(int c)
+{
+	return c == '+' || c == '-' || c == '*' || c == '/' || c == '^';
+}
+
+static int calc_is_fn(int c)
+{
+	return c && strchr("sotSOTlgr", c) != NULL;
+}
+
+/* does an operand end with c (so an operator or postfix can follow)? */
+static int calc_ends_operand(int c)
+{
+	return (c >= '0' && c <= '9') || c == '.' || c == ')' || c == 'A' || c == 'p' ||
+	       c == 'e' || c == '%' || c == '!';
+}
+
+/* the last character, or 0 */
+static int calc_last(void)
+{
+	return A.calc_len ? (unsigned char)A.calc_expr[A.calc_len - 1] : 0;
+}
+
+static int calc_open_brackets(void)
+{
+	int i, n = 0;
+	for (i = 0; i < A.calc_len; ++i)
+		n += A.calc_expr[i] == '(' ? 1 : A.calc_expr[i] == ')' ? -1 : 0;
+	return n;
+}
+
+/* is the '-' at i a sign (not a subtraction)? */
+static int calc_is_sign(int i)
+{
+	int p = i ? (unsigned char)A.calc_expr[i - 1] : 0;
+	return !p || calc_is_op(p) || p == '(' || p == 'E';
+}
+
+static void calc_insert(int at, int c)
+{
+	if (A.calc_len >= CALC_MAX)
+		return;
+	memmove(A.calc_expr + at + 1, A.calc_expr + at, (size_t)(A.calc_len - at));
+	A.calc_expr[at] = (char)c;
+	A.calc_len++;
+	A.calc_expr[A.calc_len] = 0;
+}
+
+static void calc_append(const char *s)
+{
+	if (A.calc_len + (int)strlen(s) > CALC_MAX)
+		return;
+	while (*s)
+		calc_insert(A.calc_len, (unsigned char)*s++);
+}
+
+static void calc_remove(int at)
+{
+	memmove(A.calc_expr + at, A.calc_expr + at + 1, (size_t)(A.calc_len - at - 1));
+	A.calc_len--;
+	A.calc_expr[A.calc_len] = 0;
+}
+
+static void calc_set(const char *s)
+{
+	A.calc_len = (int)strlen(s);
+	memcpy(A.calc_expr, s, (size_t)A.calc_len + 1);
+}
+
+/* start of the number being typed at the end: i such that expr[i..] is
+ * digits and points; *in_exp set if it is the part after an E */
+static int calc_number_start(int *in_exp)
+{
+	int i = A.calc_len;
+	while (i > 0 && ((A.calc_expr[i - 1] >= '0' && A.calc_expr[i - 1] <= '9') ||
+			 A.calc_expr[i - 1] == '.'))
+		i--;
+	*in_exp = 0;
+	if (i > 0 && A.calc_expr[i - 1] == 'E')
+		*in_exp = 1;
+	else if (i > 1 && (A.calc_expr[i - 1] == '-' || A.calc_expr[i - 1] == '+') &&
+		 A.calc_expr[i - 2] == 'E')
+		*in_exp = 1;
+	return i;
+}
+
+/* ± : change the sign of the last number (or bracket, function, Ans) */
+static void calc_negate(void)
+{
+	int i = A.calc_len, c = calc_last();
+	if (c == ')') {
+		/* back to the matching (, and its function if any */
+		int depth = 0;
+		while (i > 0) {
+			c = (unsigned char)A.calc_expr[--i];
+			depth += c == ')' ? 1 : c == '(' ? -1 : 0;
+			if (!depth)
+				break;
+		}
+		if (i > 0 && calc_is_fn((unsigned char)A.calc_expr[i - 1]))
+			i--;
+	} else {
+		while (i > 0) {
+			c = (unsigned char)A.calc_expr[i - 1];
+			if ((c >= '0' && c <= '9') || c == '.' || c == 'A' || c == 'p' || c == 'e' ||
+			    c == '%' || c == '!' || c == 'E')
+				i--;
+			else if ((c == '-' || c == '+') && i > 1 && A.calc_expr[i - 2] == 'E')
+				i -= 2;	/* the sign of an exponent: part of the number */
+			else
+				break;
+		}
+	}
+	/* i: start of the operand (== calc_len if there is none yet) */
+	if (i > 0 && A.calc_expr[i - 1] == '-') {
+		if (calc_is_sign(i - 1))
+			calc_remove(i - 1);		/* -5 -> 5 */
+		else
+			A.calc_expr[i - 1] = '+';	/* 3-5 -> 3+5 */
+	} else if (i > 0 && A.calc_expr[i - 1] == '+' && !calc_is_sign(i - 1)) {
+		A.calc_expr[i - 1] = '-';		/* 3+5 -> 3-5 */
+	} else {
+		calc_insert(i, '-');			/* 5 -> -5 */
+	}
+}
+
+static void calc_press(int code)
+{
+	int c, in_exp;
+	if (code == CK_2ND) {
+		A.calc_2nd = !A.calc_2nd;
+		return;
+	}
+	A.calc_2nd = 0;
+	if (code == CK_DEG) {
+		A.calc_rad = !A.calc_rad;
+		A.state_dirty = 1;
+		if (A.calc_done) {
+			/* show the answer of the same sum in the new unit */
+			double v;
+			if (calc_eval(A.calc_expr, A.calc_ans, calc_flags(), &v) == CALC_OK)
+				A.calc_ans = v;
+		}
+		return;
+	}
+	if (code == CK_AC) {
+		calc_set("");
+		A.calc_done = 0;
+		A.calc_err = 0;
+		return;
+	}
+	if (A.calc_done) {
+		/* after =: a number starts afresh, an operator carries on
+		 * from the answer */
+		A.calc_done = 0;
+		if (calc_is_op(code) || code == '%' || code == '!' || code == CK_SQ ||
+		    code == CK_CUBE || code == CK_RECIP)
+			calc_set("A");
+		else if (code == CK_NEG) {
+			calc_set("-A");
+			A.calc_done = 1;
+			code = CK_EQ;
+		} else if (code != CK_DEL && code != CK_EQ)
+			calc_set("");
+	}
+	c = calc_last();
+	A.calc_err = 0;
+	switch (code) {
+	case CK_DEL:
+		if (A.calc_len) {
+			int was = calc_last();
+			calc_remove(A.calc_len - 1);
+			if (was == '(' && calc_is_fn(calc_last()))
+				calc_remove(A.calc_len - 1);	/* "sin(" goes at once */
+		}
+		return;
+	case CK_NEG:
+		calc_negate();
+		return;
+	case CK_EQ: {
+		double v;
+		int r;
+		if (!A.calc_len)
+			return;
+		r = calc_eval(A.calc_expr, A.calc_ans, calc_flags(), &v);
+		if (r == CALC_OK) {
+			A.calc_ans = v;
+			A.calc_done = 1;
+			A.state_dirty = 1;
+		} else {
+			A.calc_err = r;
+		}
+		return;
+	}
+	case '+': case '*': case '/': case '^':
+		if (!A.calc_len)
+			calc_insert(0, 'A');	/* starts from Ans */
+		else if (c == '(' || c == 'E')
+			return;
+		else if (calc_is_op(c)) {
+			/* replace the operator (and a sign after one) */
+			while (A.calc_len && calc_is_op(calc_last()))
+				calc_remove(A.calc_len - 1);
+			if (!A.calc_len)
+				return;
+		}
+		calc_insert(A.calc_len, code);
+		return;
+	case '-':
+		if (c == '-')
+			return;
+		if (c == '+')
+			calc_remove(A.calc_len - 1);	/* 3+ then - is 3- */
+		calc_insert(A.calc_len, '-');	/* also a sign after * / ^ ( E */
+		return;
+	case '%': case '!':
+		if (calc_ends_operand(c))
+			calc_insert(A.calc_len, code);
+		return;
+	case CK_SQ: case CK_CUBE: case CK_RECIP:
+		if (!A.calc_len)
+			calc_insert(0, 'A');
+		else if (!calc_ends_operand(c))
+			return;
+		calc_append(code == CK_SQ ? "^2" : code == CK_CUBE ? "^3" : "^-1");
+		return;
+	case ')':
+		if (calc_open_brackets() > 0 && calc_ends_operand(c))
+			calc_insert(A.calc_len, ')');
+		return;
+	case '.': {
+		/* one point per number, none in an exponent; "." alone
+		 * becomes "0." */
+		int i = calc_number_start(&in_exp);
+		if (in_exp)
+			return;
+		if (strchr(A.calc_expr + i, '.'))
+			return;
+		if (i == A.calc_len)
+			calc_insert(A.calc_len, '0');
+		calc_insert(A.calc_len, '.');
+		return;
+	}
+	case 'E': {
+		/* times ten to the: after a number, or 1E on its own */
+		int i = calc_number_start(&in_exp);
+		if (in_exp)
+			return;
+		if (i == A.calc_len)
+			calc_insert(A.calc_len, '1');
+		calc_insert(A.calc_len, 'E');
+		return;
+	}
+	case CK_EXPE:
+		calc_append("e^(");
+		return;
+	case CK_TENX:
+		if ((c >= '0' && c <= '9') || c == '.')
+			calc_insert(A.calc_len, '*');	/* 2 then 10^x: 2*10^( */
+		calc_append("10^(");
+		return;
+	default:
+		if (calc_is_fn(code)) {
+			char f[3] = { (char)code, '(', 0 };
+			calc_append(f);
+			return;
+		}
+		/* digits, (, Ans, pi, e */
+		if (code >= '0' && code <= '9' && c == '0') {
+			/* no leading zeros: "007" is "7" (but 0.07 and 10 are fine) */
+			int i = A.calc_len - 1;
+			if (i == 0 || !((A.calc_expr[i - 1] >= '0' && A.calc_expr[i - 1] <= '9') ||
+					A.calc_expr[i - 1] == '.'))
+				calc_remove(i);
+		}
+		calc_insert(A.calc_len, code);
+		return;
+	}
+}
+
+/* the expression as shown: x for *, ÷ for /, − for -, Ans, π, sin ... */
+static void calc_display(const char *e, char *out, size_t cap)
+{
+	size_t n = 0;
+	for (; *e && n + 9 < cap; ++e) {
+		const char *t = NULL;
+		switch (*e) {
+		case '*': t = "\xc3\x97"; break;
+		case '/': t = "\xc3\xb7"; break;
+		case '-': t = "\xe2\x88\x92"; break;
+		case 'A': t = "Ans"; break;
+		case 'p': t = "\xcf\x80"; break;
+		case 's': t = "sin"; break;
+		case 'o': t = "cos"; break;
+		case 't': t = "tan"; break;
+		case 'S': t = "sin" SUP_M1; break;
+		case 'O': t = "cos" SUP_M1; break;
+		case 'T': t = "tan" SUP_M1; break;
+		case 'l': t = "ln"; break;
+		case 'g': t = "log"; break;
+		case 'r': t = "\xe2\x88\x9a"; break;
+		}
+		if (t) {
+			size_t k = strlen(t);
+			memcpy(out + n, t, k);
+			n += k;
+		} else {
+			out[n++] = *e;
+		}
+	}
+	out[n] = 0;
+}
+
+/* right aligned at right edge xr; if too wide, the start is cut off and
+ * shown as … (the end, where you type, stays visible) */
+static void calc_text_right(int xr, int base, int maxw, int font, const char *s, int colour)
+{
+	static const char ell[] = "\xe2\x80\xa6";
+	const char *p = s;
+	int w = font_width(font, s, strlen(s));
+	if (w > maxw) {
+		int we = font_width(font, ell, 3);
+		while (*p && font_width(font, p, strlen(p)) > maxw - we) {
+			p++;
+			while (((uint8_t)*p & 0xc0) == 0x80)
+				p++;
+		}
+		w = we + font_width(font, p, strlen(p));
+		text_at(xr - w, base, font, ell, colour);
+		text_at(xr - w + we, base, font, p, colour);
+		return;
+	}
+	text_at(xr - w, base, font, s, colour);
+}
+
+/* the biggest of these fonts the label fits in */
+static int calc_label_font(const char *s, int maxw, int big)
+{
+	static const int fonts[] = { FONT_TITLE, FONT_HEADING, FONT_SMALLL, FONT_SMALL };
+	int i;
+	for (i = big ? 0 : 1; i < 3; ++i)
+		if (font_width(fonts[i], s, strlen(s)) <= maxw)
+			return fonts[i];
+	return FONT_SMALL;
+}
+
+static void draw_calc(void)
+{
+	const calc_layout_t *L = calc_lay();
+	char shown[CALC_MAX * 6 + 8], res[48];
+	int i, w, font, left = 4;
+	double v;
+
+	memset(A.fb, 0, sizeof(A.fb));
+	/* mode tabs, and how to leave */
+	for (i = 0; i < 2; ++i) {
+		int x = calc_tab_x[i], tw = calc_tab_x[i + 1] - x, on = i == (A.calc_mode ? 1 : 0);
+		if (on)
+			fill(x, 0, tw, CALC_TAB_H, BLACK);
+		else
+			fill(x + tw - 1, 3, 1, CALC_TAB_H - 6, BLACK);
+		text_centre(x + tw / 2, 14, FONT_HEADING, calc_tabs[i], on ? WHITE : BLACK);
+	}
+	text_at(SCREEN_W - 4 - font_width(FONT_SMALL, "RANDOM: back", 12), 12, FONT_SMALL,
+		"RANDOM: back", BLACK);
+	hline(0, CALC_TAB_H, SCREEN_W);
+
+	/* angle unit and 2nd, at the left of the display */
+	if (A.calc_mode) {
+		text_at(3, CALC_TAB_H + 12, FONT_SMALL, A.calc_rad ? "RAD" : "DEG", BLACK);
+		if (A.calc_2nd) {
+			fill(2, CALC_TAB_H + 15, 19, 11, BLACK);
+			text_at(4, CALC_TAB_H + 24, FONT_SMALL, "2nd", WHITE);
+		}
+		left = 24;
+	}
+
+	/* expression, then the result (or a preview of it) */
+	calc_display(A.calc_expr, shown, sizeof(shown) - 3);
+	if (A.calc_done)
+		strcat(shown, " =");
+	calc_text_right(SCREEN_W - 5, L->expr_base, SCREEN_W - 5 - left, FONT_TEXT, shown, BLACK);
+	res[0] = 0;
+	font = L->res_font;
+	if (A.calc_err) {
+		strcpy(res, calc_error_text(A.calc_err));
+		font = FONT_HEADING;
+	} else if (A.calc_done) {
+		calc_format(A.calc_ans, res);
+	} else if (!A.calc_len) {
+		strcpy(res, "0");
+	} else if (calc_eval(A.calc_expr, A.calc_ans, calc_flags(), &v) == CALC_OK) {
+		/* live preview while typing, smaller than a result */
+		calc_format(v, res);
+		font = FONT_HEADING;
+	}
+	if (res[0]) {
+		w = font_width(font, res, strlen(res));
+		if (w > SCREEN_W - 5 - left && font == FONT_TITLEL)
+			font = FONT_TITLE;
+		calc_text_right(SCREEN_W - 5, L->res_base, SCREEN_W - 5 - left, font, res, BLACK);
+	}
+
+	/* keys: light on a dark board like the search keyboard; = dark */
+	fill(0, L->key_y - 2, SCREEN_W, SCREEN_H - L->key_y + 2, BLACK);
+	for (i = 0; i < L->nkeys; ++i) {
+		const calc_key_t *k = &L->keys[i];
+		int x = k->col * L->col_w + 2, y = L->key_y + k->row * L->row_h + 2;
+		int kw = k->span * L->col_w - 4, kh = L->row_h - 4;
+		int on = (k->code == CK_EQ) || (k->code == CK_2ND && A.calc_2nd);
+		int dark = on != (i == A.pressed_key);
+		const char *label = k->label;
+		int code = k->code, big, f;
+		if (A.calc_2nd && k->label2) {
+			label = k->label2;
+			code = k->code2;
+		}
+		if (code == CK_DEG)
+			label = A.calc_rad ? "RAD" : "DEG";
+		/* operators a size up: the minus is thin */
+		big = calc_is_op(code) && code != '^';
+		big |= code == CK_NEG || code == CK_EQ;
+		f = calc_label_font(label, kw - 4, big);
+		fill(x, y, kw, kh, WHITE);
+		fill(x, y, 1, 1, BLACK);
+		fill(x + kw - 1, y, 1, 1, BLACK);
+		fill(x, y + kh - 1, 1, 1, BLACK);
+		fill(x + kw - 1, y + kh - 1, 1, 1, BLACK);
+		if (dark)
+			fill(x + 2, y + 2, kw - 4, kh - 4, BLACK);
+		else if (A.calc_2nd && k->label2)
+			gfx_rect(A.fb, SCREEN_STRIDE, SCREEN_H, x + 2, y + 2, kw - 4, kh - 4, BLACK);
+		text_centre(x + kw / 2, y + kh / 2 + (f == FONT_SMALL ? 4 : f == FONT_SMALLL ? 5 : 6),
+			    f, label, dark ? WHITE : BLACK);
+	}
+}
+
+/* a tap on the mode tabs */
+static int calc_tab_tap(int x, int y)
+{
+	int m;
+	if (y >= CALC_TAB_H || x >= calc_tab_x[2])
+		return 0;
+	m = x >= calc_tab_x[1];
+	if (m != A.calc_mode) {
+		A.calc_mode = m;
+		A.calc_2nd = 0;
+		A.state_dirty = 1;
+	}
+	A.need_draw = 1;
+	return 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* search */
 
 static int visible_rows(void)
@@ -1194,11 +1835,17 @@ static void draw_search(void)
 			const char *a = A.opts & HTML_NOTES ? "Footnotes: on" : "Footnotes: off";
 			const char *b = A.opts & HTML_CITES ? "Citations: on" : "Citations: off";
 			int wa = font_width(FONT_SMALL, a, strlen(a)), wb = font_width(FONT_SMALL, b, strlen(b));
-			A.opt_y = y + (A.kb_visible ? 76 : 96);
+			const char *c = A.opts & HTML_LARGE ? "Large text: on" : "Large text: off";
+			int wc = font_width(FONT_SMALL, c, strlen(c));
+			A.opt_y = y + (A.kb_visible ? 74 : 96);
 			text_at(SCREEN_W / 4 - wa / 2, A.opt_y, FONT_SMALL, a, BLACK);
 			text_at(3 * SCREEN_W / 4 - wb / 2, A.opt_y, FONT_SMALL, b, BLACK);
 			gfx_dotted(A.fb, SCREEN_STRIDE, SCREEN_H, SCREEN_W / 4 - wa / 2, A.opt_y + 2, wa);
 			gfx_dotted(A.fb, SCREEN_STRIDE, SCREEN_H, 3 * SCREEN_W / 4 - wb / 2, A.opt_y + 2, wb);
+			/* the third switch on a line of its own below */
+			text_at(SCREEN_W / 2 - wc / 2, A.opt_y + OPT2_DY, FONT_SMALL, c, BLACK);
+			gfx_dotted(A.fb, SCREEN_STRIDE, SCREEN_H, SCREEN_W / 2 - wc / 2,
+				   A.opt_y + OPT2_DY + 2, wc);
 		}
 		{
 			/* "zimwiki 1.0.0 · Oct 29 2026" at the foot of the free area */
@@ -1391,6 +2038,92 @@ static void finish_layout(void)
 	A.open_drawn = 0;
 	lay_more(&A.lay, -1, 0);
 	A.opening = 0;
+	A.need_draw = 1;
+}
+
+/* the Text size switch changed: lay the open page out again in the
+ * new size, keeping the line at the top of the screen.  Saved scroll
+ * positions (Back, HISTORY) are pixels, so they are scaled by how much
+ * this page grew or shrank, or by a typical ratio */
+static int32_t scale256(int32_t v, int32_t k)
+{
+	return (v >> 8) * k + ((v & 255) * k >> 8);
+}
+
+static void relayout_article(int large)
+{
+	layout_t nl;
+	uint32_t i, off = 0;
+	int32_t old_y = 0, new_y = 0;
+	int have_off = 0;
+
+	lay_set_large(large);
+	if (!A.have_article || A.lay.large == (uint8_t)large)
+		return;
+	for (i = 0; i < A.lay.nlines; ++i) {
+		const lay_line_t *ln = &A.lay.lines[i];
+		if (ln->y + ln->h <= A.scroll || !ln->nfrag)
+			continue;
+		off = A.lay.frags[ln->first].off;
+		old_y = ln->y;
+		have_off = 1;
+		break;
+	}
+	if (lay_begin(&nl, &A.doc) < 0) {
+		lay_free(&nl);
+		return;
+	}
+	banner("Please wait\xe2\x80\xa6");
+	A.opening = 2;
+	A.open_t0 = plat_ms();
+	A.open_drawn = 0;
+	for (;;) {
+		int found = 0;
+		if (!have_off)
+			break;
+		for (i = 0; i < nl.nlines; ++i) {
+			const lay_line_t *ln = &nl.lines[i];
+			if (!ln->nfrag)
+				continue;
+			if (nl.frags[ln->first].off > off) {
+				found = 1;
+				break;
+			}
+			new_y = ln->y;
+		}
+		if (found || nl.done)
+			break;
+		if (lay_more(&nl, nl.height + 20 * SCREEN_H, 0) < 0)
+			break;
+	}
+	if (!nl.done)
+		lay_more(&nl, new_y + 3 * SCREEN_H, 0);
+	A.opening = 0;
+	lay_free(&A.lay);
+	A.lay = nl;
+	A.lay.doc = &A.doc;
+	{
+		/* scale factor in 1/256ths (32-bit maths only: no 64-bit
+		 * division on the device) */
+		int32_t k = large ? 384 : 171;
+		int j;
+		if (old_y > 2 * SCREEN_H && new_y > 0)
+			k = old_y < 0x400000 ? new_y * 256 / old_y : new_y / (old_y >> 8);
+		if (k < 64 || k > 1024)
+			k = large ? 384 : 171;
+		for (j = 0; j < A.nback; ++j)
+			if (A.back[j].kind == BI_ARTICLE)
+				A.back[j].scroll = scale256(A.back[j].scroll, k);
+		for (j = 0; j < A.nhist; ++j)
+			A.hist[j].scroll = scale256(A.hist[j].scroll, k);
+		A.hist_dirty = 1;
+	}
+	A.scroll = have_off ? new_y : 0;
+	if (A.scroll > max_scroll())
+		A.scroll = max_scroll();
+	hist_update_scroll();
+	A.vel = 0;
+	A.hl_w = 0;
 	A.need_draw = 1;
 }
 
@@ -1594,6 +2327,7 @@ static void draw(void)
 	case S_HISTORY: draw_history(); break;
 	case S_SECTIONS: draw_sections(); break;
 	case S_LIBRARY: draw_library(); break;
+	case S_CALC: draw_calc(); break;
 	default: draw_message(); break;
 	}
 	present();
@@ -1636,6 +2370,14 @@ static void button(int code)
 		return;
 	A.toolbar = 0;
 	A.vel = 0;
+	if (A.screen == S_CALC && (code == BTN_SEARCH || code == BTN_HISTORY)) {
+		/* leave the calculator: HISTORY back to where you were,
+		 * SEARCH to the search screen */
+		calc_leave();
+		if (code == BTN_SEARCH)
+			goto_search();
+		return;
+	}
 	switch (code) {
 	case BTN_SEARCH:
 		goto_search();
@@ -1647,7 +2389,10 @@ static void button(int code)
 		A.hist_down_ms = plat_ms();
 		break;
 	case BTN_RANDOM:
-		random_article();
+		/* short press = random article (or leave the calculator),
+		 * held = calculator (see tick and the button up event) */
+		A.rnd_down = 1;
+		A.rnd_down_ms = plat_ms();
 		break;
 	case BTN_POWER:
 		save_all();
@@ -1669,6 +2414,10 @@ static void touch_down(int x, int y)
 	A.pressed_row = -1;
 	A.pressed_key = -1;
 	switch (A.screen) {
+	case S_CALC:
+		A.pressed_key = calc_key_at(x, y);
+		A.need_draw = 1;
+		break;
 	case S_SEARCH:
 		if (A.kb_visible && y >= KB_Y) {
 			A.pressed_key = key_at(x, y);
@@ -1735,7 +2484,7 @@ static void touch_move(int x, int y)
 		return;
 	if (!A.dragging && (y - A.ty0 > DRAG_START || A.ty0 - y > DRAG_START ||
 			    x - A.tx0 > DRAG_START * 2 || A.tx0 - x > DRAG_START * 2)) {
-		if (A.screen == S_SEARCH && A.pressed_key >= 0) {
+		if ((A.screen == S_SEARCH || A.screen == S_CALC) && A.pressed_key >= 0) {
 			/* sliding on the keyboard: just track the key */
 		} else {
 			A.dragging = 1;
@@ -1748,6 +2497,14 @@ static void touch_move(int x, int y)
 	A.t_last = now;
 	A.tx = x;
 	A.ty = y;
+	if (A.screen == S_CALC) {
+		int k = calc_key_at(x, y);
+		if (k != A.pressed_key) {
+			A.pressed_key = k;
+			A.need_draw = 1;
+		}
+		return;
+	}
 	if (A.screen == S_SEARCH && A.pressed_key >= 0) {
 		int k = y >= KB_Y ? key_at(x, y) : -1;
 		if (k != A.pressed_key) {
@@ -1818,6 +2575,14 @@ static void touch_up(int x, int y)
 	A.need_draw = 1;
 
 	switch (A.screen) {
+	case S_CALC:
+		if (key >= 0) {
+			const calc_key_t *k = &calc_lay()->keys[key];
+			calc_press(A.calc_2nd && k->label2 ? k->code2 : k->code);
+		} else if (!was_drag) {
+			calc_tab_tap(x, y);
+		}
+		return;
 	case S_SEARCH:
 		if (key >= 0) {
 			if (keys[key].code != K_BS)
@@ -1826,10 +2591,19 @@ static void touch_up(int x, int y)
 		}
 		if (was_drag)
 			return;
-		if (!A.qlen && A.opt_y && y >= A.opt_y - 12 && y <= A.opt_y + 6) {
+		if (!A.qlen && A.opt_y && y >= A.opt_y - 12 && y <= A.opt_y + 5) {
 			/* a switch: applies to the next article opened */
 			A.opts ^= x < SCREEN_W / 2 ? HTML_NOTES : HTML_CITES;
 			html_set_options(A.opts);
+			A.state_dirty = 1;
+			A.need_draw = 1;
+			return;
+		}
+		if (!A.qlen && A.opt_y && y > A.opt_y + 5 && y <= A.opt_y + OPT2_DY + 7) {
+			/* Text size: the open page too, at once */
+			A.opts ^= HTML_LARGE;
+			html_set_options(A.opts);
+			relayout_article((A.opts & HTML_LARGE) != 0);
 			A.state_dirty = 1;
 			A.need_draw = 1;
 			return;
@@ -1940,6 +2714,10 @@ void app_event(const void *ev)
 			A.hist_up_pending = 0;	/* bounce: still the same press */
 			break;
 		}
+		if (e->code == BTN_RANDOM && A.rnd_up_pending) {
+			A.rnd_up_pending = 0;	/* bounce: still the same press */
+			break;
+		}
 		if (A.btn[c].seen_up && now - A.btn[c].up_ms < BOUNCE_MS) {
 			A.btn[c].ignore = 1;
 			break;
@@ -1959,9 +2737,47 @@ void app_event(const void *ev)
 			A.hist_up_pending = 1;	/* act once it has stayed up */
 			A.hist_up_ms = A.btn[c].up_ms;
 		}
+		if (e->code == BTN_RANDOM && A.rnd_down && !A.rnd_up_pending) {
+			A.rnd_up_pending = 1;
+			A.rnd_up_ms = A.btn[c].up_ms;
+		}
 		break;
 	}
 	case PE_KEY:
+		if (A.screen == S_CALC) {
+			/* PC keyboard (simulator, scripted tests) */
+			int k = e->code;
+			if (k == '\n' || k == '\r' || k == '=')
+				calc_press(CK_EQ);
+			else if (k == 8)
+				calc_press(CK_DEL);
+			else if (k == 'c' || k == 27)
+				calc_press(CK_AC);
+			else if (k == 'n')
+				calc_press(CK_NEG);
+			else if (k == 'a')
+				calc_press('A');
+			else if (k == 'x')
+				calc_press('*');
+			else if (k == 'D')
+				calc_press(CK_DEG);
+			else if (k == 'X')
+				calc_press(CK_EXPE);
+			else if (k == 'Y')
+				calc_press(CK_TENX);
+			else if (k == 'q')
+				calc_press(CK_SQ);
+			else if (k == 'Q')
+				calc_press(CK_CUBE);
+			else if (k == 'i')
+				calc_press(CK_RECIP);
+			else if (k == 'M')
+				A.calc_mode = !A.calc_mode;
+			else if (k && strchr("0123456789.+-*/%()^!pesotSOTlgrE", k))
+				calc_press(k);
+			A.need_draw = 1;
+			break;
+		}
 		/* host keyboard shortcut for typing */
 		if (A.screen != S_SEARCH && A.have_lib && e->code >= 32)
 			goto_search();
@@ -1990,9 +2806,23 @@ void app_event(const void *ev)
 /* ------------------------------------------------------------------ */
 /* time based work: momentum, key repeat, saving, prefetch */
 
+/* a button was released less than BOUNCE_MS ago.  The app must stay awake
+ * through that window: asleep, grifo stops the timer behind plat_ms, so
+ * the next press (seconds later) would look like contact bounce of the
+ * last release and be ignored */
+static int button_settling(void)
+{
+	uint32_t now = plat_ms();
+	int c;
+	for (c = 0; c < 4; ++c)
+		if (A.btn[c].seen_up && now - A.btn[c].up_ms < BOUNCE_MS)
+			return 1;
+	return 0;
+}
+
 static int animating(void)
 {
-	return A.vel != 0 || A.hist_down || (A.touching && A.pressed_key >= 0 &&
+	return A.vel != 0 || A.hist_down || A.rnd_down || button_settling() || (A.touching && A.pressed_key >= 0 &&
 			      keys[A.pressed_key].code == K_BS && A.screen == S_SEARCH);
 }
 
@@ -2006,6 +2836,20 @@ static void tick(void)
 	} else if (A.hist_down && !A.hist_up_pending && now - A.hist_down_ms >= HOLD_MS) {
 		A.hist_down = 0;	/* held: the list opens while still pressed */
 		show_history();
+	}
+	if (A.rnd_up_pending && now - A.rnd_up_ms >= BOUNCE_MS) {
+		A.rnd_up_pending = 0;
+		A.rnd_down = 0;
+		if (A.screen == S_CALC)
+			calc_leave();
+		else
+			random_article();
+	} else if (A.rnd_down && !A.rnd_up_pending && now - A.rnd_down_ms >= HOLD_MS) {
+		A.rnd_down = 0;		/* held: in or out of the calculator */
+		if (A.screen == S_CALC)
+			calc_leave();
+		else
+			calc_enter();
 	}
 	if (A.vel && A.screen == S_ARTICLE) {
 		while ((int32_t)(now - A.anim_ms) >= 20 && A.vel) {
@@ -2067,6 +2911,19 @@ static int idle_work(void)
 	return 0;
 }
 
+int app_awake(void)
+{
+	/* the same tests as app_main before it calls plat_wait */
+	if (animating() || A.need_draw || A.search_dirty)
+		return 1;
+	if (A.have_article && !A.lay.done && !A.touching && !A.vel)
+		return 1;
+	if ((A.state_dirty || A.hist_dirty || (A.have_lib && A.lib.ext_dirty)) &&
+	    A.have_lib && !A.touching)
+		return 1;
+	return 0;
+}
+
 void app_settle(void)
 {
 	int guard = 0;
@@ -2089,9 +2946,18 @@ static void restore_state(void)
 	int i, want = -1;
 	char name[9] = { 0 };
 	if (plat_load("ZWSTATE.DAT", &buf, &len) == 0) {
+		if (len >= 212 && zw_rd32(buf) == STATE_MAGIC && !memcmp(buf + 200, "CALC", 4)) {
+			double v;
+			memcpy(&v, buf + 204, sizeof(double));
+			if (v == v && v - v == 0)	/* not NaN or infinity */
+				A.calc_ans = v;
+			A.calc_mode = buf[212] == 1;
+			A.calc_rad = buf[213] == 1;
+		}
 		if (len >= 25 && zw_rd32(buf) == STATE_MAGIC && (buf[14] & 0x80)) {
-			A.opts = buf[14] & (HTML_NOTES | HTML_CITES);
+			A.opts = buf[14] & (HTML_NOTES | HTML_CITES | HTML_LARGE);
 			html_set_options(A.opts);
+			lay_set_large((A.opts & HTML_LARGE) != 0);
 		}
 		if (len >= 25 && zw_rd32(buf) == STATE_MAGIC) {
 			memcpy(name, buf + 4, 8);
@@ -2139,7 +3005,12 @@ static int load_fallback_font(void)
 {
 	uint8_t *font;
 	uint32_t flen;
-	if (plat_load("WIKIFONT.BIN", &font, &flen) < 0)
+	int r;
+	A.font_loading = 1;
+	A.spin_t = 0;
+	r = plat_load("WIKIFONT.BIN", &font, &flen);
+	A.font_loading = 0;
+	if (r < 0)
 		return -1;
 	if (font_set_fallback(font, flen) < 0) {
 		zw_free(font);
@@ -2253,6 +3124,22 @@ void app_describe(char *out, int cap)
 	case S_SECTIONS:
 		n = snprintf(tmp, sizeof(tmp), "sections n=%d top=%d", A.nsect, A.sect_top);
 		break;
+	case S_CALC: {
+		char r[48];
+		double v;
+		if (A.calc_err)
+			strcpy(r, calc_error_text(A.calc_err));
+		else if (A.calc_done)
+			calc_format(A.calc_ans, r);
+		else if (calc_eval(A.calc_expr, A.calc_ans, calc_flags(), &v) == CALC_OK)
+			calc_format(v, r);
+		else
+			strcpy(r, "-");
+		n = snprintf(tmp, sizeof(tmp), "calc \"%s\" result=%s%s%s%s%s", A.calc_expr, r,
+			     A.calc_done ? " done" : "", A.calc_mode ? " sci" : "",
+			     A.calc_rad ? " rad" : "", A.calc_2nd ? " 2nd" : "");
+		break;
+	}
 	case S_MESSAGE:
 		n = snprintf(tmp, sizeof(tmp), "message \"%s\" \"%s\"", A.msg_title, A.nmsg ? A.msg[0] : "");
 		break;

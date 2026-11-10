@@ -62,6 +62,9 @@ typedef struct doc {
  * their [a] markers, citations and their [1] markers */
 #define HTML_NOTES 1
 #define HTML_CITES 2
+/* not an html option as such: the Text size switch, kept with the other
+ * two (ZWSTATE.DAT byte 14); html only uses it to measure maths columns */
+#define HTML_LARGE 4
 void html_set_options(int opts);
 void doc_add_anchor(doc_t *d, const char *id, uint32_t n);
 int doc_find_anchor(const doc_t *d, const char *name, uint32_t *off);

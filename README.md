@@ -1,6 +1,6 @@
 # zimwiki: ZIM reader firmware for the Openmoko WikiReader
 
-Version 1.0.34 (released as *WikiReader Gen2*). The version and build date
+Version 1.0.40 (released as *WikiReader Gen2*). The version and build date
 are shown at the bottom of the search screen; `zimprep --version` prints
 it for the PC tool.
 
@@ -247,9 +247,11 @@ Notes:
 | SEARCH button | search screen, as you left it; again to clear the query |
 | Tap the wiki's name in the empty search bar | choose another wiki (when the card has more than one) |
 | Footnotes / Citations on the empty search screen | switch [a] notes and [1] citations on or off (from the next article; remembered). With them on, tap a marker to jump to its note, ^ to jump back |
+| Large text on the empty search screen | switch the article text between normal (Liberation 15 px) and large (18 px; titles, headings and small print grow too). Applies at once to the open page, keeping your place; remembered |
 | HISTORY button, short press | **Back**, like a browser: the results or list you came from, or the article you followed a link from |
 | HISTORY button, hold ½ s | list of recently read articles |
-| RANDOM button | random article |
+| RANDOM button | random article (on release; in the calculator: back to where you were) |
+| RANDOM button, hold ½ s | **calculator** (hold again, or press RANDOM, SEARCH or HISTORY, to leave). Tabs at the top: Simple, Sci |
 | Tap the bottom left corner of an article | Back (as on the original WikiReader) |
 | Type | results update as you type; tap one to open it. Drag the results to put the keyboard away, tap the search bar to bring it back; 123 for digits and punctuation |
 | Drag | scroll an article or a list (flick for momentum) |
@@ -423,6 +425,12 @@ now and then, or grifo's watchdog resets the unit after 20 s.
 * 1.0.32: two switches on the empty search screen, kept in ZWSTATE.DAT: Footnotes (explanatory notes: [a] markers and the Notes list, lettered a. b. c.) and Citations ([1] markers and the References list). Both are off by default, which is the plain text of 1.0.30. When on, tapping a marker jumps to its note and the ^ in front of a note jumps back to the marker; Back returns each time.
 * 1.0.33: keyboard in the style of the original firmware: three rows of ten 28 px keys (QWERTYUIOP / ASDFGHJKL← / ZXCV space BNM 123), light keys on a dark board with bold capital labels, each key's touch area its whole cell. Go and the hide key are gone: tap a result, and drag the results to put the keyboard away.
 * 1.0.34: no code changes: example paths in the mkroot instructions made generic (~/release/...).
+* 1.0.35: the Large text switch (third switch on the empty search screen, already in the code) is documented in Using it; small print colon no longer runs into the letter before it ("Large text: on" showed as "Large text on").
+* 1.0.36: a spinner (| / - \ in a small box, top right) while WIKIFONT.BIN loads. It is read the first time a screen needs a character outside the built-in fonts (once per power on, a few seconds on the device), which looked like a hang, e.g. on the first search results with such a title.
+* 1.0.37: calculator: hold RANDOM. Simple mode (a row of mode tabs at the top, for Scientific and Programmer later): + − × ÷, brackets (closed for you at =), %, ±, Ans, DEL, AC, with a live preview of the result while typing. Ten significant digits, exponent form from 1e10 and below 0.0001. 50+10% is 55 and 80−25% is 60, as on pocket calculators; 2(3+4) multiplies. After =, a number starts a new sum and an operator carries on from the answer. Ans is kept in ZWSTATE.DAT. RANDOM now acts on release, so it can tell a press from a hold. New: src/calc.c, tests/calctest.c (checked against printf on 200,000 numbers; results identical on the emulated WikiReader).
+* 1.0.38: Sci calculator tab: sin cos tan and their inverses (2nd), ln, log, e^x and 10^x (2nd), square root, x², x³, 1/x, x^y, x!, π, e, EXP (1.5E-3), DEG/RAD. 2nd changes the outlined keys for one press. sin 30 is 0.5 and tan 90 is "Math error" in degrees; sin π is 0 in radians. The mode and the angle unit are kept in ZWSTATE.DAT. The maths functions are written in src/calc.c (the device has no maths library) and checked against the PC's on 1.1 million values (worst error 1.7e-14, far below the ten digits shown); 300 sums give identical results on the emulated WikiReader.
+* 1.0.39: power off (or auto power off) with the calculator open came back on the search screen instead of the article underneath, so RANDOM then gave a random article. The screen under the calculator is now saved. New test for it (PC and emulated).
+* 1.0.40: a button press could be ignored after the device had slept: grifo stops the timer behind the app's clock while the CPU sleeps, so the next press looked like contact bounce of the last release (within 80 ms on the stopped clock). Most visible as RANDOM not leaving the calculator after holding RANDOM to open it, but SEARCH and HISTORY could miss a press the same way. The app now stays awake for the 80 ms after a release. zimwiki-headless now stops its clock too whenever the app would sleep (ZW_CLOCK_RUNS=1 for the old behaviour); new test for it.
 * 1.0.13: saves write only the data (a few KB) over the existing file instead of rewriting all 64 KB: quicker and much less writing to the card.
 * 1.0.12: the device never grows or recreates a save file (a cut-off save left an empty file that froze the next save); a failed save is not retried in a loop (that kept the unit awake); device logging no longer uses the unreliable printf.
 * 1.0.11: zimprep makes each wiki's NAME.HIS and NAME.EXT in advance, and the release has an empty ZWSTATE.DAT: creating files on a nearly full card made the WikiReader freeze or go blank (its FAT code searches the whole card for free space).

@@ -28,7 +28,7 @@ FAST    := $(BASE) -O2
 ZSTD    := -DMEM_FORCE_MEMORY_ACCESS=3 -DZSTD_LEGACY_SUPPORT=0 -DZSTD_DISABLE_ASM -DZSTD_NO_INTRINSICS \
            -DZSTD_NO_TRACE -DZSTD_STRIP_ERROR_STRINGS -DXXH_NO_XXH3 -w
 
-SLOW_SRC := src/app.c src/library.c src/fat.c src/index.c src/fold.c \
+SLOW_SRC := src/app.c src/library.c src/fat.c src/index.c src/fold.c src/calc.c \
             src/tex.c fonts/fonts.c device/plat_grifo.c
 FAST_SRC := src/zim.c src/blockdev.c src/font.c src/gfx.c src/html.c src/layout.c \
             third_party/xz/xz_crc32.c third_party/xz/xz_dec_stream.c third_party/xz/xz_dec_lzma2.c

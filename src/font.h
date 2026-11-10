@@ -37,6 +37,10 @@ void font_set_fallback_loader(int (*fn)(void));
  * (unknown characters get a hollow box) */
 void font_glyph(int f, uint32_t cp, glyph_t *g);
 
+/* the large counterpart of an article font (the Text size switch);
+ * fonts without one (maths, IPA) are returned unchanged */
+int font_big(int f);
+
 int font_height(int f);		/* line height in pixels */
 int font_ascent(int f);
 int font_width(int f, const char *s, size_t len);

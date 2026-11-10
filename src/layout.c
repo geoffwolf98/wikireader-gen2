@@ -94,8 +94,9 @@ static void end_line(builder_t *b)
 			desc = dsc;
 	}
 	if (!ln->nfrag) {
-		asc = font_ascent(FONT_TEXT);
-		desc = font_height(FONT_TEXT) - asc;
+		int ft = b->l->large ? FONT_TEXTL : FONT_TEXT;
+		asc = font_ascent(ft);
+		desc = font_height(ft) - asc;
 	}
 	ln->base = (uint16_t)asc;
 	ln->h = (uint16_t)(asc + desc);
@@ -103,17 +104,29 @@ static void end_line(builder_t *b)
 	b->line_open = 0;
 }
 
+/* the font a run is drawn in: the large set when the Text size switch
+ * was on when this layout began */
+#define RFONT(b, r) ((b)->l->large ? font_big((r)->font) : (r)->font)
+
+static int lay_large_now;
+
+void lay_set_large(int on)
+{
+	lay_large_now = on != 0;
+}
+
 static void add_frag(builder_t *b, const doc_run_t *r, uint32_t off, uint32_t len, int w)
 {
 	layout_t *l = b->l;
 	lay_line_t *ln = &l->lines[b->line_index];
 	lay_frag_t *f;
-	int dy = (r->flags & RF_SUP) ? -5 : (r->flags & RF_SUB) ? 3 : 0;
+	int dy = (r->flags & RF_SUP) ? (b->l->large ? -6 : -5) :
+		 (r->flags & RF_SUB) ? (b->l->large ? 4 : 3) : 0;
 
 	/* extend the previous fragment when contiguous and same style */
 	if (ln->nfrag) {
 		f = &l->frags[l->nfrags - 1];
-		if (f->off + f->len == off && f->font == r->font && f->link == r->link &&
+		if (f->off + f->len == off && f->font == RFONT(b, r) && f->link == r->link &&
 		    f->dy == dy && f->x + f->w == b->x && f->len + len < 65000) {
 			f->len = (uint16_t)(f->len + len);
 			f->w = (uint16_t)(f->w + w);
@@ -131,7 +144,7 @@ static void add_frag(builder_t *b, const doc_run_t *r, uint32_t off, uint32_t le
 	f->off = off;
 	f->len = (uint16_t)len;
 	f->link = r->link;
-	f->font = r->font;
+	f->font = (uint8_t)RFONT(b, r);
 	f->dy = (int8_t)dy;
 	f->pad = 0;
 	ln->nfrag++;
@@ -202,7 +215,7 @@ static void place_word(builder_t *b, int kind, seg_t *segs, int nseg)
 				const uint8_t *q = p;
 				glyph_t g;
 				uint32_t cp = utf8_next(&q, end);
-				font_glyph(r->font, cp, &g);
+				font_glyph(RFONT(b, r), cp, &g);
 				if (b->x + cw + g.adv > b->right && (cw || b->x > b->x0))
 					break;
 				cw += g.adv;
@@ -232,7 +245,7 @@ static void layout_block(builder_t *b, const doc_block_t *bl, int prev_kind)
 	b->x0 = MARGIN_L + indent;
 	b->right = LAYOUT_WIDTH - MARGIN_R;
 	if (kind == BK_ITEM)
-		b->x0 += bl->number ? 14 : 9;
+		b->x0 += b->l->large ? (bl->number ? 17 : 11) : (bl->number ? 14 : 9);
 	if (kind == BK_QUOTE)
 		b->right -= 8;
 	first_line = b->l->nlines;
@@ -257,8 +270,8 @@ static void layout_block(builder_t *b, const doc_block_t *bl, int prev_kind)
 			const uint8_t *p = (const uint8_t *)d->text + r->start;
 			const uint8_t *end = p + r->len;
 			glyph_t sp;
-			const uint8_t *adv = font_ascii_adv(r->font);
-			font_glyph(r->font, ' ', &sp);
+			const uint8_t *adv = font_ascii_adv(RFONT(b, r));
+			font_glyph(RFONT(b, r), ' ', &sp);
 			while (p < end && !b->err) {
 				const uint8_t *w0;
 				int brk = 0, aw = 0;
@@ -286,7 +299,7 @@ static void layout_block(builder_t *b, const doc_block_t *bl, int prev_kind)
 					segs[nseg].r = r;
 					segs[nseg].off = (uint32_t)((const char *)w0 - d->text);
 					segs[nseg].len = (uint32_t)(p - w0);
-					segs[nseg].w = adv ? aw : font_width(r->font, (const char *)w0, (size_t)(p - w0));
+					segs[nseg].w = adv ? aw : font_width(RFONT(b, r), (const char *)w0, (size_t)(p - w0));
 					nseg++;
 					continue;
 				}
@@ -310,7 +323,7 @@ static void layout_block(builder_t *b, const doc_block_t *bl, int prev_kind)
 				segs[nseg].r = r;
 				segs[nseg].off = (uint32_t)((const char *)w0 - d->text);
 				segs[nseg].len = (uint32_t)(p - w0);
-				segs[nseg].w = font_width(r->font, (const char *)w0, (size_t)(p - w0));
+				segs[nseg].w = font_width(RFONT(b, r), (const char *)w0, (size_t)(p - w0));
 				nseg++;
 				if (brk) {
 					place_word(b, kind, segs, nseg);
@@ -343,6 +356,7 @@ int lay_begin(layout_t *l, const doc_t *d)
 	uint32_t i;
 	memset(l, 0, sizeof(*l));
 	l->doc = d;
+	l->large = (uint8_t)lay_large_now;
 	for (i = 0; i < STRIP_CACHE; ++i)
 		l->strip_id[i] = -1;
 	l->prefetched_top = -1;
@@ -422,7 +436,7 @@ static uint32_t line_at(const layout_t *l, int32_t y)
 	return lo;
 }
 
-static void draw_number(uint8_t *buf, int rows, int x_right, int base, int n)
+static void draw_number(uint8_t *buf, int rows, int x_right, int base, int n, int font)
 {
 	char s[8];
 	int k = 0, i;
@@ -445,8 +459,8 @@ static void draw_number(uint8_t *buf, int rows, int x_right, int base, int n)
 	for (i = 0; i < k; ++i)
 		s[i] = t[k - 1 - i];
 	s[k++] = '.';
-	font_draw(buf, SCREEN_STRIDE, rows, x_right - font_width(FONT_TEXT, s, (size_t)k),
-		  base, FONT_TEXT, s, (size_t)k, BLACK);
+	font_draw(buf, SCREEN_STRIDE, rows, x_right - font_width(font, s, (size_t)k),
+		  base, font, s, (size_t)k, BLACK);
 }
 
 static void render_strip(layout_t *l, int32_t sid, uint8_t *buf)
@@ -472,10 +486,14 @@ static void render_strip(layout_t *l, int32_t sid, uint8_t *buf)
 		}
 		switch (ln->deco) {
 		case LD_BULLET:
-			gfx_fill(buf, SCREEN_STRIDE, STRIP_H, ln->deco_x + 2, base - 6, 3, 3, BLACK);
+			if (l->large)
+				gfx_fill(buf, SCREEN_STRIDE, STRIP_H, ln->deco_x + 2, base - 7, 4, 4, BLACK);
+			else
+				gfx_fill(buf, SCREEN_STRIDE, STRIP_H, ln->deco_x + 2, base - 6, 3, 3, BLACK);
 			break;
 		case LD_NUMBER:
-			draw_number(buf, STRIP_H, ln->deco_x + 12, base, ln->number);
+			draw_number(buf, STRIP_H, ln->deco_x + (l->large ? 15 : 12), base, ln->number,
+				    l->large ? FONT_TEXTL : FONT_TEXT);
 			break;
 		case LD_RULE:
 			gfx_hline(buf, SCREEN_STRIDE, STRIP_H, MARGIN_L + 20, y + 2,

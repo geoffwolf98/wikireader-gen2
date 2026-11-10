@@ -67,10 +67,23 @@ int plat_load(const char *name, uint8_t **data, uint32_t *len)
 	n = ftell(f);
 	fseek(f, 0, SEEK_SET);
 	*data = zw_alloc((size_t)n + 1);
-	if (!*data || fread(*data, 1, (size_t)n, f) != (size_t)n) {
+	if (!*data) {
 		fclose(f);
-		zw_free(*data);
-		return ZW_EIO;
+		return ZW_ENOMEM;
+	}
+	{
+		/* in pieces with progress, like the device (spinner for the font) */
+		long done = 0;
+		while (done < n) {
+			size_t k = n - done > 16384 ? 16384 : (size_t)(n - done);
+			if (fread(*data + done, 1, k, f) != k) {
+				fclose(f);
+				zw_free(*data);
+				return ZW_EIO;
+			}
+			done += (long)k;
+			ZW_PROGRESS(4, (uint32_t)done, (uint32_t)n);
+		}
 	}
 	fclose(f);
 	*len = (uint32_t)n;

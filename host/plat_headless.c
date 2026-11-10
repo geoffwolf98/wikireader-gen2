@@ -55,6 +55,11 @@ static void advance(uint32_t ms)
 {
 	uint32_t end = host_clock + ms;
 	while (host_clock < end) {
+		/* like the WikiReader: when the app waits for an event, grifo
+		 * suspends the CPU and its timer stops, so no time passes on
+		 * the app's clock (ZW_CLOCK_RUNS=1: the old behaviour) */
+		if (!app_awake() && !getenv("ZW_CLOCK_RUNS"))
+			break;
 		host_clock += 10;
 		app_settle();
 	}

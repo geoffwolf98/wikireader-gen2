@@ -101,6 +101,37 @@ for i, d in enumerate(da):
         break
 sys.exit(0 if ok else 1)
 PY
+		# a ZIM without a usable title list in its header (some newer
+		# Kiwix ZIMs): zimprep rebuilds it, the same as the original
+		python3 - "$z" "$T/notitles.zim" <<'PY'
+import struct, sys
+d = bytearray(open(sys.argv[1], 'rb').read())
+n = struct.unpack('<I', d[24:28])[0]; tp = struct.unpack('<Q', d[40:48])[0]
+d[tp:tp + 4 * n] = bytes(4 * n)
+open(sys.argv[2], 'wb').write(d)
+PY
+		rm -rf "$T/rc3"
+		$B/zimprep --recluster 64 --level 3 "$T/notitles.zim" "$T/rc3" > /dev/null 2>&1
+		cat "$T"/rc3/WIKI.Z* > "$T/rc3.zim"
+		python3 - "$T/rc2.zim" "$T/rc3.zim" <<'PY' && ok "title list rebuilt: $n" || bad "title list rebuilt: $n"
+import struct, sys
+from libzim.reader import Archive
+# same titles in the same order, every entry once (the order of entries
+# with equal titles is the writer's choice)
+def keys(p):
+    d = open(p, 'rb').read(); n = struct.unpack('<I', d[24:28])[0]
+    tp = struct.unpack('<Q', d[40:48])[0]; up = struct.unpack('<Q', d[32:40])[0]
+    tl = struct.unpack('<%dI' % n, d[tp:tp + 4 * n]); ptr = struct.unpack('<%dQ' % n, d[up:up + 8 * n])
+    out = []
+    for e in tl:
+        q = ptr[e]; mime = struct.unpack('<H', d[q:q + 2])[0]
+        o = 12 if mime == 0xffff else (8 if mime >= 0xfffd else 16)
+        u = d.index(b'\0', q + o); t = d[u + 1:d.index(b'\0', u + 1)] or d[q + o:u]
+        out.append((d[q + 3], t))
+    return out, sorted(tl) == list(range(n))
+ka, pa = keys(sys.argv[1]); kb, pb = keys(sys.argv[2])
+sys.exit(0 if pa and pb and ka == kb and Archive(sys.argv[2]).check() else 1)
+PY
 		# the search index after renumbering: every title still leads
 		# to the same article as in the index of the untouched ZIM
 		python3 - "$z" "$T/rc2.zim" "$T/prep/WIKI.IDX" "$T/rc2/WIKI.IDX" "$B/idxtest" <<'PY' && ok "index after renumbering: $n" || bad "index after renumbering: $n"

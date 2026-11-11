@@ -1,6 +1,6 @@
 # zimwiki: ZIM reader firmware for the Openmoko WikiReader
 
-Version 1.0.41 (released as *WikiReader Gen2*). The version and build date
+Version 1.0.42 (released as *WikiReader Gen2*). The version and build date
 are shown at the bottom of the search screen; `zimprep --version` prints
 it for the PC tool.
 
@@ -438,6 +438,7 @@ now and then, or grifo's watchdog resets the unit after 20 s.
 * 1.0.39: power off (or auto power off) with the calculator open came back on the search screen instead of the article underneath, so RANDOM then gave a random article. The screen under the calculator is now saved. New test for it (PC and emulated).
 * 1.0.40: a button press could be ignored after the device had slept: grifo stops the timer behind the app's clock while the CPU sleeps, so the next press looked like contact bounce of the last release (within 80 ms on the stopped clock). Most visible as RANDOM not leaving the calculator after holding RANDOM to open it, but SEARCH and HISTORY could miss a press the same way. The app now stays awake for the 80 ms after a release. zimwiki-headless now stops its clock too whenever the app would sleep (ZW_CLOCK_RUNS=1 for the old behaviour); new test for it.
 * 1.0.41: zimprep --recluster leaves pictures out by default (and redirects to them), so a "maxi" ZIM gives about the same card files as a "nopic" one; --keep-images keeps them. The entries are renumbered, with the ZIM's title lists (X/listing/titleOrdered), redirects, main page and the WikiReader's index to match; metadata (the Kiwix icon) stays. Checked with libzim (integrity check, every entry by path, redirects, listings) on old and new style ZIMs, and the index gives the same article for every title as before. The test climate wiki shrinks from 8.8 to 6.5 MB. Only zimprep changed (init.app only by its version number). Source tarballs 1.0.35 to 1.0.40 held a stray Python wheel (zstandard...whl) by mistake; removed.
+* 1.0.42: zimprep stopped after reclustering a 2026 English Wikipedia maxi ZIM ("title list has 30142538 of 21673153 entries"): that ZIM has no usable title list in its header. zimprep now checks the list at the start (so a problem shows in minutes, not after hours) and, when it is missing or incomplete, rebuilds it by sorting the entries by namespace and title; on the test ZIMs the rebuilt list is byte for byte the original. Before 1.0.41 such a list was copied as it was, unchecked (only plain, unprepared ZIMs use it on the WikiReader).
 * 1.0.13: saves write only the data (a few KB) over the existing file instead of rewriting all 64 KB: quicker and much less writing to the card.
 * 1.0.12: the device never grows or recreates a save file (a cut-off save left an empty file that froze the next save); a failed save is not retried in a loop (that kept the unit awake); device logging no longer uses the unreliable printf.
 * 1.0.11: zimprep makes each wiki's NAME.HIS and NAME.EXT in advance, and the release has an empty ZWSTATE.DAT: creating files on a nearly full card made the WikiReader freeze or go blank (its FAT code searches the whole card for free space).

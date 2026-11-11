@@ -327,6 +327,105 @@ static void progress(const char *what, uint64_t done, uint64_t total)
 		fprintf(stderr, "\n");
 }
 
+/* the title pointer list, rebuilt: every entry ordered by namespace,
+ * then title (the URL when the title is empty), then URL, then number */
+typedef struct tkey {
+	uint32_t entry;
+	uint32_t off;		/* into the key pool: ns byte, then title */
+} tkey_t;
+
+static char *tk_pool;
+
+static int tkey_cmp(const void *a, const void *b)
+{
+	const tkey_t *x = a, *y = b;
+	const char *a1 = tk_pool + x->off, *b1 = tk_pool + y->off;
+	int c = strcmp(a1, b1);
+	if (c)
+		return c;
+	/* same title: by URL (stored after the title) */
+	c = strcmp(a1 + strlen(a1) + 1, b1 + strlen(b1) + 1);
+	if (c)
+		return c;
+	return x->entry < y->entry ? -1 : x->entry > y->entry;
+}
+
+static void build_title_list(zim_t *z, uint8_t *tl)
+{
+	tkey_t *k = malloc(sizeof(tkey_t) * (z->entry_count ? z->entry_count : 1));
+	size_t cap = (size_t)z->entry_count * 64 + 64, used = 0;
+	uint8_t dbuf[4096];
+	uint32_t i;
+	tk_pool = malloc(cap);
+	for (i = 0; i < z->entry_count; ++i) {
+		uint16_t mime;
+		uint32_t n = read_dirent(z, i, dbuf, sizeof(dbuf)), hdr;
+		const char *url, *title;
+		size_t ul, tlen;
+		mime = zw_rd16(dbuf);
+		hdr = mime == ZIM_MIME_REDIRECT ? 12 :
+		      (mime == ZIM_MIME_LINKTARGET || mime == ZIM_MIME_DELETED) ? 8 : 16;
+		url = (const char *)dbuf + hdr;
+		ul = strnlen(url, n - hdr);
+		title = url + ul + 1;
+		tlen = hdr + ul + 1 < n ? strnlen(title, n - hdr - ul - 1) : 0;
+		if (!tlen) {
+			title = url;
+			tlen = ul;
+		}
+		if (used + tlen + ul + 3 > cap) {
+			cap = cap * 2 + tlen + ul + 3;
+			tk_pool = realloc(tk_pool, cap);
+		}
+		k[i].entry = i;
+		k[i].off = (uint32_t)used;
+		if (used > 0xffffff00u) {
+			fprintf(stderr, "zimprep: titles too long to sort\n");
+			exit(1);
+		}
+		tk_pool[used] = (char)dbuf[3];
+		memcpy(tk_pool + used + 1, title, tlen);
+		tk_pool[used + 1 + tlen] = 0;
+		memcpy(tk_pool + used + 2 + tlen, url, ul);
+		tk_pool[used + 2 + tlen + ul] = 0;
+		used += tlen + ul + 3;
+		if ((i & 0x3fff) == 0)
+			progress("rebuilding the title list", i, z->entry_count);
+	}
+	qsort(k, z->entry_count, sizeof(tkey_t), tkey_cmp);
+	for (i = 0; i < z->entry_count; ++i)
+		zw_wr32(tl + (size_t)i * 4, k[i].entry);
+	progress("rebuilding the title list", z->entry_count, z->entry_count);
+	stage_done("rebuilding the title list");
+	free(k);
+	free(tk_pool);
+	tk_pool = NULL;
+}
+
+/* the ZIM's own title list, if it is a whole one (every entry once);
+ * newer Kiwix ZIMs may have none in the header.  Else rebuilt */
+static uint8_t *title_list(zim_t *z)
+{
+	uint8_t *tl = malloc((size_t)z->entry_count * 4 + 1);
+	uint8_t *seen = calloc((z->entry_count >> 3) + 1, 1);
+	uint32_t i;
+	int ok = z->title_ptr_pos >= 80 &&
+		 zw_io_read(&z->io, z->title_ptr_pos, tl, z->entry_count * 4) == ZW_OK;
+	for (i = 0; ok && i < z->entry_count; ++i) {
+		uint32_t e = zw_rd32(tl + (size_t)i * 4);
+		if (e >= z->entry_count || (seen[e >> 3] & (1 << (e & 7))))
+			ok = 0;
+		else
+			seen[e >> 3] |= (uint8_t)(1 << (e & 7));
+	}
+	free(seen);
+	if (!ok) {
+		fprintf(stderr, "the ZIM's title list is missing or incomplete: rebuilding it\n");
+		build_title_list(z, tl);
+	}
+	return tl;
+}
+
 int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, int level,
 	      int threads, int keep_fulltext, int keep_images, uint32_t **out_map,
 	      uint32_t *out_entries, uint64_t *out_size, uint32_t *out_chunks)
@@ -335,6 +434,7 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 	uint32_t *map = NULL;		/* old entry -> new, ZIM_NONE: left out */
 	uint32_t nentries = z->entry_count, npics = 0, npicredir = 0;
 	uint8_t *listing = NULL;	/* per entry: a title listing blob */
+	uint8_t *titles;		/* the title pointer list (old numbers) */
 	cw_t w;
 	ref_t *refs;
 	uint32_t nrefs = 0, i, nclusters = 0, cap_clusters = 1024;
@@ -365,6 +465,8 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 
 	t_start = t_stage = time(NULL);
 	listing = calloc(z->entry_count ? z->entry_count : 1, 1);
+	/* the title list first: a problem shows in minutes, not hours */
+	titles = title_list(z);
 	/* 0. pictures, and redirects that end at one, are left out (the
 	 * WikiReader shows no pictures); the rest are renumbered in order,
 	 * which keeps the URL order the ZIM format requires */
@@ -584,8 +686,7 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 	{
 		/* titles keep their order: copy the list (renumbered, without
 		 * the entries left out) */
-		uint8_t *tl = malloc((size_t)z->entry_count * 4 + 1);
-		zw_io_read(&z->io, z->title_ptr_pos, tl, z->entry_count * 4);
+		uint8_t *tl = titles;
 		if (map) {
 			uint32_t n2 = 0;
 			for (i = 0; i < z->entry_count; ++i) {

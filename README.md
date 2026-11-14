@@ -179,6 +179,42 @@ search and slow pages), but the device then has to create those files
 itself, which on a nearly full card can freeze or reset it. It is not
 supported.
 
+### Running zimprep inside docker
+
+On local copy of project build code inside docker:
+
+```
+cd wikireader-gen2
+docker build -f Dockerfile.zimprep -t wikireader-gen2/zimprep .
+```
+
+You can check image have been built correctly by running (it will display
+zimprep's version):
+
+```
+docker run -it --rm wikireader-gen2/zimprep
+```
+
+Mount your local directory with zim files as `/zim` (use your user's
+`uid` and `gid` to fix file permissions). Your zim files should be inside
+working directory, just add params for `zimprep` after image name:
+
+```
+docker run -it --rm \
+  --user "$(id -u):$(id -g)" \
+  -v /home/user/zims:/zim \
+  wikireader-gen2/zimprep \
+  -n ENWIKI \
+  --recluster \
+  --keep-fulltext \
+  wikipedia_en_all_maxi_2022-05.zim \
+  ENWIKI
+```
+
+Directory with wikireader's version of zim file will be in your
+directory with zims files inside new directory with wiki name,
+for example: `/home/user/zims/ENWIKI`
+
 ## Making a card
 
 A card holds the software and one folder per wiki:

@@ -179,6 +179,42 @@ search and slow pages), but the device then has to create those files
 itself, which on a nearly full card can freeze or reset it. It is not
 supported.
 
+### Running zimprep inside docker
+
+On local copy of project build code inside docker:
+
+```
+cd wikireader-gen2
+docker build -f Dockerfile.zimprep -t wikireader-gen2/zimprep .
+```
+
+You can check image have been built correctly by running (it will display
+zimprep's version):
+
+```
+docker run -it --rm wikireader-gen2/zimprep
+```
+
+Mount your local directory with zim files as `/zim` (use your user's
+`uid` and `gid` to fix file permissions). Your zim files should be inside
+working directory, just add params for `zimprep` after image name:
+
+```
+docker run -it --rm \
+  --user "$(id -u):$(id -g)" \
+  -v /home/user/zims:/zim \
+  wikireader-gen2/zimprep \
+  -n ENWIKI \
+  --recluster \
+  --keep-fulltext \
+  wikipedia_en_all_maxi_2022-05.zim \
+  ENWIKI
+```
+
+Directory with wikireader's version of zim file will be in your
+directory with zims files inside new directory with wiki name,
+for example: `/home/user/zims/ENWIKI`
+
 ## Making a card
 
 A card holds the software and one folder per wiki:
@@ -410,35 +446,35 @@ now and then, or grifo's watchdog resets the unit after 20 s.
 
 ## Changes
 
-* 1.0.14: taller keyboard keys (26 px rows); the pressed letter pops up large above the key.
-* 1.0.15: key rows back to 23 px so 5 search results show above the keyboard; the large letter pop-up stays.
-* 1.0.16: up to 32 wikis per card (was 8); zimprep warns when a ZIM is mostly PDFs, video or pictures, and its progress lines no longer overwrite each other; SanDisk Ultra PLUS 200 GB added to the known-good cards.
-* 1.0.17: the wiki list shows how many wikis there are, and never scrolls past the end (it could open showing only the last few). README lists guile-3.0 for building the device software.
-* 1.0.18: big compressed blocks (long books) are unpacked in one pass: the buffer is sized from the zstd frame header instead of growing and starting again, which on the WikiReader meant reading the block from the card again. The harmless "zstd error 70" lines are gone.
-* 1.0.19: the "Opening…" bar gives laying out the page half its length (it had 10%, but on long books it takes most of the time, so the bar sat at 91%).
-* 1.0.20: long pages open much sooner: only the first screens are laid out before the page shows, the rest follows in idle time (a 1.3 MB book: 24.8 s to 4.0 s in the emulator). Text is collected in bigger pieces, ASCII widths come from a table, and the parser and layout are built for speed (-O2). List and Next section finish the layout first ("Please wait").
-* 1.0.21: the "Opening…" box shows the page size, e.g. "Opening… (1.2 MB)", and the line under the percentage says what is happening (unpacking from the card, reading the text, laying out the page).
-* 1.0.22: tools/mkroot.sh makes (and can upload) the software-only release; README.txt explains updating a card without losing your place.
-* 1.0.23: redirects stored as a small page that sends the browser on (meta refresh, used for redirects to a section, e.g. "Left quasi-reflexivity") now open the target article at that section instead of an empty page. tools/mkroot.sh uploads the release as a folder, like the main item.
-* 1.0.24: ticks and crosses: {{Y}}/{{N}} table marks (a picture plus a hidden Y or N) show as ✓ and ✗, and ✔ ✗ ✘ ☐ ☑ ☒ were added to the maths fonts. In tables, "Total,<br>Semiconnex" no longer gets a double comma and runs of empty cells no longer leave rows of dots.
-* 1.0.25: WIKIFONT.BIN adds GNU Unifont (57,407 glyphs, 1.95 MB): Devanagari, Bengali, Tamil and the other Indian scripts, Hebrew, Arabic, Thai, Korean, Georgian, Armenian, Ethiopic and more no longer show as boxes. Hebrew and Arabic runs are shown right to left. The font is read in pieces with the watchdog fed. New: make wikifont, tools/mkwikifont.py.
-* 1.0.26: invisible characters (zero width no-break space, joiners, direction marks and isolates) are no longer drawn as Unifont's labelled boxes ("ZWNBSP"): they are left out of WIKIFONT.BIN (57,313 glyphs) and treated as zero width. tools/sim.sh copies WIKIFONT.BIN into the state folder on every start.
-* 1.0.27: links to a section ("Page#Section") open the page at that heading, and links within the page ("#Section") scroll to it with Back returning. A section that cannot be found opens the page at the top, or leaves you where you are for a link within the page.
-* 1.0.28: Back to the search results returns to where the list was scrolled (not to the top of the search again); Back to the History list keeps its place too.
-* 1.0.29: SEARCH from an article also returns to the results scrolled as they were left (pressing it again still clears).
-* 1.0.30: SEARCH keeps the keyboard as you left it: hidden to see more results stays hidden (it still comes up for an empty search, and after the second press that clears).
-* 1.0.31: explanatory notes are shown: a Notes section (reference lists with a group, from {{efn}} and {{notelist}}) appears at the end of the article, while citation lists stay hidden. Headings left with nothing under them (a Notes section of citations only, a gallery) are dropped.
-* 1.0.32: two switches on the empty search screen, kept in ZWSTATE.DAT: Footnotes (explanatory notes: [a] markers and the Notes list, lettered a. b. c.) and Citations ([1] markers and the References list). Both are off by default, which is the plain text of 1.0.30. When on, tapping a marker jumps to its note and the ^ in front of a note jumps back to the marker; Back returns each time.
-* 1.0.33: keyboard in the style of the original firmware: three rows of ten 28 px keys (QWERTYUIOP / ASDFGHJKL← / ZXCV space BNM 123), light keys on a dark board with bold capital labels, each key's touch area its whole cell. Go and the hide key are gone: tap a result, and drag the results to put the keyboard away.
-* 1.0.34: no code changes: example paths in the mkroot instructions made generic (~/release/...).
-* 1.0.35: the Large text switch (third switch on the empty search screen, already in the code) is documented in Using it; small print colon no longer runs into the letter before it ("Large text: on" showed as "Large text on").
-* 1.0.36: a spinner (| / - \ in a small box, top right) while WIKIFONT.BIN loads. It is read the first time a screen needs a character outside the built-in fonts (once per power on, a few seconds on the device), which looked like a hang, e.g. on the first search results with such a title.
-* 1.0.37: calculator: hold RANDOM. Simple mode (a row of mode tabs at the top, for Scientific and Programmer later): + − × ÷, brackets (closed for you at =), %, ±, Ans, DEL, AC, with a live preview of the result while typing. Ten significant digits, exponent form from 1e10 and below 0.0001. 50+10% is 55 and 80−25% is 60, as on pocket calculators; 2(3+4) multiplies. After =, a number starts a new sum and an operator carries on from the answer. Ans is kept in ZWSTATE.DAT. RANDOM now acts on release, so it can tell a press from a hold. New: src/calc.c, tests/calctest.c (checked against printf on 200,000 numbers; results identical on the emulated WikiReader).
-* 1.0.38: Sci calculator tab: sin cos tan and their inverses (2nd), ln, log, e^x and 10^x (2nd), square root, x², x³, 1/x, x^y, x!, π, e, EXP (1.5E-3), DEG/RAD. 2nd changes the outlined keys for one press. sin 30 is 0.5 and tan 90 is "Math error" in degrees; sin π is 0 in radians. The mode and the angle unit are kept in ZWSTATE.DAT. The maths functions are written in src/calc.c (the device has no maths library) and checked against the PC's on 1.1 million values (worst error 1.7e-14, far below the ten digits shown); 300 sums give identical results on the emulated WikiReader.
-* 1.0.39: power off (or auto power off) with the calculator open came back on the search screen instead of the article underneath, so RANDOM then gave a random article. The screen under the calculator is now saved. New test for it (PC and emulated).
-* 1.0.40: a button press could be ignored after the device had slept: grifo stops the timer behind the app's clock while the CPU sleeps, so the next press looked like contact bounce of the last release (within 80 ms on the stopped clock). Most visible as RANDOM not leaving the calculator after holding RANDOM to open it, but SEARCH and HISTORY could miss a press the same way. The app now stays awake for the 80 ms after a release. zimwiki-headless now stops its clock too whenever the app would sleep (ZW_CLOCK_RUNS=1 for the old behaviour); new test for it.
-* 1.0.41: zimprep --recluster leaves pictures out by default (and redirects to them), so a "maxi" ZIM gives about the same card files as a "nopic" one; --keep-images keeps them. The entries are renumbered, with the ZIM's title lists (X/listing/titleOrdered), redirects, main page and the WikiReader's index to match; metadata (the Kiwix icon) stays. Checked with libzim (integrity check, every entry by path, redirects, listings) on old and new style ZIMs, and the index gives the same article for every title as before. The test climate wiki shrinks from 8.8 to 6.5 MB. Only zimprep changed (init.app only by its version number). Source tarballs 1.0.35 to 1.0.40 held a stray Python wheel (zstandard...whl) by mistake; removed.
 * 1.0.42: zimprep stopped after reclustering a 2026 English Wikipedia maxi ZIM ("title list has 30142538 of 21673153 entries"): that ZIM has no usable title list in its header. zimprep now checks the list at the start (so a problem shows in minutes, not after hours) and, when it is missing or incomplete, rebuilds it by sorting the entries by namespace and title; on the test ZIMs the rebuilt list is byte for byte the original. Before 1.0.41 such a list was copied as it was, unchecked (only plain, unprepared ZIMs use it on the WikiReader).
+* 1.0.41: zimprep --recluster leaves pictures out by default (and redirects to them), so a "maxi" ZIM gives about the same card files as a "nopic" one; --keep-images keeps them. The entries are renumbered, with the ZIM's title lists (X/listing/titleOrdered), redirects, main page and the WikiReader's index to match; metadata (the Kiwix icon) stays. Checked with libzim (integrity check, every entry by path, redirects, listings) on old and new style ZIMs, and the index gives the same article for every title as before. The test climate wiki shrinks from 8.8 to 6.5 MB. Only zimprep changed (init.app only by its version number). Source tarballs 1.0.35 to 1.0.40 held a stray Python wheel (zstandard...whl) by mistake; removed.
+* 1.0.40: a button press could be ignored after the device had slept: grifo stops the timer behind the app's clock while the CPU sleeps, so the next press looked like contact bounce of the last release (within 80 ms on the stopped clock). Most visible as RANDOM not leaving the calculator after holding RANDOM to open it, but SEARCH and HISTORY could miss a press the same way. The app now stays awake for the 80 ms after a release. zimwiki-headless now stops its clock too whenever the app would sleep (ZW_CLOCK_RUNS=1 for the old behaviour); new test for it.
+* 1.0.39: power off (or auto power off) with the calculator open came back on the search screen instead of the article underneath, so RANDOM then gave a random article. The screen under the calculator is now saved. New test for it (PC and emulated).
+* 1.0.38: Sci calculator tab: sin cos tan and their inverses (2nd), ln, log, e^x and 10^x (2nd), square root, x², x³, 1/x, x^y, x!, π, e, EXP (1.5E-3), DEG/RAD. 2nd changes the outlined keys for one press. sin 30 is 0.5 and tan 90 is "Math error" in degrees; sin π is 0 in radians. The mode and the angle unit are kept in ZWSTATE.DAT. The maths functions are written in src/calc.c (the device has no maths library) and checked against the PC's on 1.1 million values (worst error 1.7e-14, far below the ten digits shown); 300 sums give identical results on the emulated WikiReader.
+* 1.0.37: calculator: hold RANDOM. Simple mode (a row of mode tabs at the top, for Scientific and Programmer later): + − × ÷, brackets (closed for you at =), %, ±, Ans, DEL, AC, with a live preview of the result while typing. Ten significant digits, exponent form from 1e10 and below 0.0001. 50+10% is 55 and 80−25% is 60, as on pocket calculators; 2(3+4) multiplies. After =, a number starts a new sum and an operator carries on from the answer. Ans is kept in ZWSTATE.DAT. RANDOM now acts on release, so it can tell a press from a hold. New: src/calc.c, tests/calctest.c (checked against printf on 200,000 numbers; results identical on the emulated WikiReader).
+* 1.0.36: a spinner (| / -  in a small box, top right) while WIKIFONT.BIN loads. It is read the first time a screen needs a character outside the built-in fonts (once per power on, a few seconds on the device), which looked like a hang, e.g. on the first search results with such a title.
+* 1.0.35: the Large text switch (third switch on the empty search screen, already in the code) is documented in Using it; small print colon no longer runs into the letter before it ("Large text: on" showed as "Large text on").
+* 1.0.34: no code changes: example paths in the mkroot instructions made generic (~/release/...).
+* 1.0.33: keyboard in the style of the original firmware: three rows of ten 28 px keys (QWERTYUIOP / ASDFGHJKL← / ZXCV space BNM 123), light keys on a dark board with bold capital labels, each key's touch area its whole cell. Go and the hide key are gone: tap a result, and drag the results to put the keyboard away.
+* 1.0.32: two switches on the empty search screen, kept in ZWSTATE.DAT: Footnotes (explanatory notes: [a] markers and the Notes list, lettered a. b. c.) and Citations ([1] markers and the References list). Both are off by default, which is the plain text of 1.0.30. When on, tapping a marker jumps to its note and the ^ in front of a note jumps back to the marker; Back returns each time.
+* 1.0.31: explanatory notes are shown: a Notes section (reference lists with a group, from {{efn}} and {{notelist}}) appears at the end of the article, while citation lists stay hidden. Headings left with nothing under them (a Notes section of citations only, a gallery) are dropped.
+* 1.0.30: SEARCH keeps the keyboard as you left it: hidden to see more results stays hidden (it still comes up for an empty search, and after the second press that clears).
+* 1.0.29: SEARCH from an article also returns to the results scrolled as they were left (pressing it again still clears).
+* 1.0.28: Back to the search results returns to where the list was scrolled (not to the top of the search again); Back to the History list keeps its place too.
+* 1.0.27: links to a section ("Page#Section") open the page at that heading, and links within the page ("#Section") scroll to it with Back returning. A section that cannot be found opens the page at the top, or leaves you where you are for a link within the page.
+* 1.0.26: invisible characters (zero width no-break space, joiners, direction marks and isolates) are no longer drawn as Unifont's labelled boxes ("ZWNBSP"): they are left out of WIKIFONT.BIN (57,313 glyphs) and treated as zero width. tools/sim.sh copies WIKIFONT.BIN into the state folder on every start.
+* 1.0.25: WIKIFONT.BIN adds GNU Unifont (57,407 glyphs, 1.95 MB): Devanagari, Bengali, Tamil and the other Indian scripts, Hebrew, Arabic, Thai, Korean, Georgian, Armenian, Ethiopic and more no longer show as boxes. Hebrew and Arabic runs are shown right to left. The font is read in pieces with the watchdog fed. New: make wikifont, tools/mkwikifont.py.
+* 1.0.24: ticks and crosses: {{Y}}/{{N}} table marks (a picture plus a hidden Y or N) show as ✓ and ✗, and ✔ ✗ ✘ ☐ ☑ ☒ were added to the maths fonts. In tables, "Total,<br>Semiconnex" no longer gets a double comma and runs of empty cells no longer leave rows of dots.
+* 1.0.23: redirects stored as a small page that sends the browser on (meta refresh, used for redirects to a section, e.g. "Left quasi-reflexivity") now open the target article at that section instead of an empty page. tools/mkroot.sh uploads the release as a folder, like the main item.
+* 1.0.22: tools/mkroot.sh makes (and can upload) the software-only release; README.txt explains updating a card without losing your place.
+* 1.0.21: the "Opening…" box shows the page size, e.g. "Opening… (1.2 MB)", and the line under the percentage says what is happening (unpacking from the card, reading the text, laying out the page).
+* 1.0.20: long pages open much sooner: only the first screens are laid out before the page shows, the rest follows in idle time (a 1.3 MB book: 24.8 s to 4.0 s in the emulator). Text is collected in bigger pieces, ASCII widths come from a table, and the parser and layout are built for speed (-O2). List and Next section finish the layout first ("Please wait").
+* 1.0.19: the "Opening…" bar gives laying out the page half its length (it had 10%, but on long books it takes most of the time, so the bar sat at 91%).
+* 1.0.18: big compressed blocks (long books) are unpacked in one pass: the buffer is sized from the zstd frame header instead of growing and starting again, which on the WikiReader meant reading the block from the card again. The harmless "zstd error 70" lines are gone.
+* 1.0.17: the wiki list shows how many wikis there are, and never scrolls past the end (it could open showing only the last few). README lists guile-3.0 for building the device software.
+* 1.0.16: up to 32 wikis per card (was 8); zimprep warns when a ZIM is mostly PDFs, video or pictures, and its progress lines no longer overwrite each other; SanDisk Ultra PLUS 200 GB added to the known-good cards.
+* 1.0.15: key rows back to 23 px so 5 search results show above the keyboard; the large letter pop-up stays.
+* 1.0.14: taller keyboard keys (26 px rows); the pressed letter pops up large above the key.
 * 1.0.13: saves write only the data (a few KB) over the existing file instead of rewriting all 64 KB: quicker and much less writing to the card.
 * 1.0.12: the device never grows or recreates a save file (a cut-off save left an empty file that froze the next save); a failed save is not retried in a loop (that kept the unit awake); device logging no longer uses the unreliable printf.
 * 1.0.11: zimprep makes each wiki's NAME.HIS and NAME.EXT in advance, and the release has an empty ZWSTATE.DAT: creating files on a nearly full card made the WikiReader freeze or go blank (its FAT code searches the whole card for free space).

@@ -1,0 +1,17 @@
+FROM debian:trixie AS builder
+RUN apt update && apt install -y --no-install-recommends build-essential libzstd-dev zlib1g-dev dosfstools mtools fdisk curl zip aria2 libsdl2-dev pkg-config && apt clean
+RUN apt install -y --no-install-recommends python3 python3-pip && apt clean && pip install --no-cache-dir --break-system-packages libzim
+WORKDIR /opt/zimwiki
+COPY . /opt/zimwiki
+RUN cd /opt/zimwiki && make
+
+FROM debian:trixie AS runner
+RUN mkdir -p /opt/zimwiki
+COPY --from=builder /opt/zimwiki/build/host/zimprep /opt/zimwiki
+ENV PATH="/opt/zimwiki:$PATH"
+RUN groupadd wikireader && useradd -g wikireader wikireader
+WORKDIR /zim
+RUN chown -R wikireader:wikireader /zim
+USER wikireader
+ENTRYPOINT ["zimprep"]
+CMD ["--version"]

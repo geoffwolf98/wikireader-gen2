@@ -96,6 +96,33 @@ int host_files_open(host_files_t *f, const char *path)
 	return ZW_OK;
 }
 
+int host_files_open_pieces(host_files_t *f, const char *base, char letter)
+{
+	struct stat st;
+	char name[4096];
+	uint64_t total = 0;
+	int i;
+	memset(f, 0, sizeof(*f));
+	for (i = 0; i < HOST_MAX_FILES; ++i) {
+		snprintf(name, sizeof(name), "%s.%c%02d", base, letter, i);
+		if (stat(name, &st) != 0)
+			break;
+		f->fp[i] = fopen(name, "rb");
+		if (!f->fp[i])
+			return ZW_EIO;
+		f->start[i] = total;
+		f->size[i] = (uint64_t)st.st_size;
+		total += f->size[i];
+		f->n = i + 1;
+	}
+	if (!f->n)
+		return ZW_ENOTFOUND;
+	f->io.read = files_read;
+	f->io.ctx = f;
+	f->io.size = total;
+	return ZW_OK;
+}
+
 void host_files_close(host_files_t *f)
 {
 	int i;

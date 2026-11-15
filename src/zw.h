@@ -10,7 +10,7 @@
 #define ZW_H
 
 /* release number: shown on the search screen and by zimprep --version */
-#define ZW_VERSION "1.0.45"
+#define ZW_VERSION "1.0.46"
 
 #include <stdint.h>
 #include <stddef.h>

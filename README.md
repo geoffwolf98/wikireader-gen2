@@ -1,6 +1,6 @@
 # zimwiki: ZIM reader firmware for the Openmoko WikiReader
 
-Version 1.0.45 (released as *WikiReader Gen2*). The version and build date
+Version 1.0.46 (released as *WikiReader Gen2*). The version and build date
 are shown at the bottom of the search screen; `zimprep --version` prints
 it for the PC tool.
 
@@ -154,8 +154,8 @@ This writes `MATHS.IDX` (the search index) and `MATHS.Z00`, `MATHS.Z01`...
   GB) are left out, as the WikiReader has its own title index;
   `--keep-fulltext` keeps them. So are the pictures (and redirects to
   them), which the WikiReader cannot show: the remaining entries are
-  renumbered, and the ZIM's lists and the WikiReader's index with them;
-  `--keep-images` keeps them. Without `--recluster` the ZIM is only
+  renumbered, and the ZIM's lists and the WikiReader's index with them.
+  Without `--recluster` the ZIM is only
   split (minutes instead of hours, but slower page opening), pictures
   and all.
 * Time: minutes for the small wikis; one to a few hours for the full
@@ -167,10 +167,23 @@ This writes `MATHS.IDX` (the search index) and `MATHS.Z00`, `MATHS.Z01`...
   were. `lead` keeps each article's first picture (usually the infobox
   one), `all` up to 32 per article. Icons, maths formulas (shown as text
   already), SVG drawings and pictures under 24 pixels are left out; a
-  picture used in many articles is stored once. A picture takes about
-  4 KB (at most 5.7 KB), so the full English Wikipedia with `lead` adds
-  something like 10 to 20 GB, and `all` several times that; conversion
-  uses all CPU cores and adds to the time. The default is `none`.
+  picture used in many articles is stored once, each one compressed
+  (about a third smaller for photos). A picture takes about 3 KB (at most
+  5.7 KB); for scale, a 2022 English Wikipedia maxi made 21.3 GB of
+  picture files before compression was added, so expect about 14 GB.
+  Conversion uses all CPU cores and adds to the time. The default is
+  `none`. Never add `--keep-images` (an old option, no longer listed): it
+  keeps the original pictures inside the `.Z` files too, which the
+  WikiReader cannot show, and zimprep refuses it with `--pictures`.
+* `--add-pictures lead` or `--add-pictures all` adds the pictures to a
+  wiki you already made, without reclustering again:
+  `zimprep -n NAME --add-pictures lead INPUT.zim OUTDIR`, with the same
+  ZIM file and the folder holding that wiki's `NAME.Z00`... zimprep checks
+  that the wiki was made from that ZIM (it refuses another ZIM, or a
+  build whose entry numbers differ), then writes only `NAME.P00`...: copy
+  those to the card next to the wiki's other files. It still reads every
+  article and converts the pictures, but skips the hours of compressing.
+  Running it again with the other mode replaces the picture files.
 * Other options: `--chunk-mb N`, `--level N` (zstd level, default 19),
   `--threads N`, `--index-only` (rebuild just the index).
 
@@ -454,11 +467,12 @@ now and then, or grifo's watchdog resets the unit after 20 s.
 * 1.0.38: Sci calculator tab: sin cos tan and their inverses (2nd), ln, log, e^x and 10^x (2nd), square root, x², x³, 1/x, x^y, x!, π, e, EXP (1.5E-3), DEG/RAD. 2nd changes the outlined keys for one press. sin 30 is 0.5 and tan 90 is "Math error" in degrees; sin π is 0 in radians. The mode and the angle unit are kept in ZWSTATE.DAT. The maths functions are written in src/calc.c (the device has no maths library) and checked against the PC's on 1.1 million values (worst error 1.7e-14, far below the ten digits shown); 300 sums give identical results on the emulated WikiReader.
 * 1.0.39: power off (or auto power off) with the calculator open came back on the search screen instead of the article underneath, so RANDOM then gave a random article. The screen under the calculator is now saved. New test for it (PC and emulated).
 * 1.0.40: a button press could be ignored after the device had slept: grifo stops the timer behind the app's clock while the CPU sleeps, so the next press looked like contact bounce of the last release (within 80 ms on the stopped clock). Most visible as RANDOM not leaving the calculator after holding RANDOM to open it, but SEARCH and HISTORY could miss a press the same way. The app now stays awake for the 80 ms after a release. zimwiki-headless now stops its clock too whenever the app would sleep (ZW_CLOCK_RUNS=1 for the old behaviour); new test for it.
-* 1.0.41: zimprep --recluster leaves pictures out by default (and redirects to them), so a "maxi" ZIM gives about the same card files as a "nopic" one; --keep-images keeps them. The entries are renumbered, with the ZIM's title lists (X/listing/titleOrdered), redirects, main page and the WikiReader's index to match; metadata (the Kiwix icon) stays. Checked with libzim (integrity check, every entry by path, redirects, listings) on old and new style ZIMs, and the index gives the same article for every title as before. The test climate wiki shrinks from 8.8 to 6.5 MB. Only zimprep changed (init.app only by its version number). Source tarballs 1.0.35 to 1.0.40 held a stray Python wheel (zstandard...whl) by mistake; removed.
+* 1.0.41: zimprep --recluster leaves pictures out by default (and redirects to them), so a "maxi" ZIM gives about the same card files as a "nopic" one; --keep-images kept them (no longer listed from 1.0.46). The entries are renumbered, with the ZIM's title lists (X/listing/titleOrdered), redirects, main page and the WikiReader's index to match; metadata (the Kiwix icon) stays. Checked with libzim (integrity check, every entry by path, redirects, listings) on old and new style ZIMs, and the index gives the same article for every title as before. The test climate wiki shrinks from 8.8 to 6.5 MB. Only zimprep changed (init.app only by its version number). Source tarballs 1.0.35 to 1.0.40 held a stray Python wheel (zstandard...whl) by mistake; removed.
 * 1.0.42: zimprep stopped after reclustering a 2026 English Wikipedia maxi ZIM ("title list has 30142538 of 21673153 entries"): that ZIM has no usable title list in its header. zimprep now checks the list at the start (so a problem shows in minutes, not after hours) and, when it is missing or incomplete, rebuilds it by sorting the entries by namespace and title; on the test ZIMs the rebuilt list is byte for byte the original. Before 1.0.41 such a list was copied as it was, unchecked (only plain, unprepared ZIMs use it on the WikiReader).
 * 1.0.43: Pictures. `zimprep --pictures lead|all` turns a maxi ZIM's article pictures (JPEG, PNG, WebP, GIF) into dithered black and white bitmaps in `NAME.P00`...; the WikiReader shows them in the article where they were (infobox and figure pictures, centred, with the caption below), reading each from the card as it scrolls into view (about 110 to 140 ms more to open an article with pictures, emulated). A Pictures switch on the empty search screen turns them off and on, keeping your place (also in Back and History). Picture files made from another ZIM are ignored. Tests: a test ZIM with the awkward cases (data-src, noscript copies, ../ paths, encoded names, maths and icons to ignore, a shared picture, a redirect), on the PC and emulated builds. zimprep needs libwebp-dev for this (it builds without it, and then refuses --pictures).
 * 1.0.44: Picture captions: the caption under a picture (figure, thumbnail, gallery and infobox captions) is shown in small text, centred under the picture, and goes with it when Pictures is off. 1.0.43 hid them (its notes said otherwise). Device only: wikis made with 1.0.43's zimprep get them as they are.
 * 1.0.45: Scrolling over pictures no longer stalls or overshoots. Reading a picture from the card held up the page while the finger was moving, and the movement made during the wait arrived as one jump that was taken as a fast flick, so the page flew on after the finger lifted. Now a picture not read yet is drawn as a frame while the finger is down or the page is gliding, and read once it stops; and a flick that spans any hold-up (more than 50 ms) is not turned into a glide. Pictures are also read further ahead (4 strips, 256 rows, below the screen) while nothing is happening. Tests: swiping a long page with a slow card (ZW_SECTOR_US) and a fling after a slow frame (new script commands move and slowdraw). Device only.
+* 1.0.46: Picture files about a third smaller: each bitmap is compressed on its own (zstd) and unpacked as it is read, adding about 10 ms per picture on the device (picture file format version 2; version 1 files from 1.0.43 to 1.0.45 still work). `zimprep --add-pictures lead|all` adds pictures to a wiki already made, checking it was made from the same ZIM with the same numbering, without reclustering again. `--keep-images` is no longer listed and is refused with `--pictures`: together they stored every picture twice (the originals in the .Z files, which the WikiReader cannot show, and the bitmaps), e.g. 103 GB instead of about 59 GB for a 2022 English Wikipedia. Version 2 picture files record which build they belong to, so pictures from another build of the same ZIM (different numbering) are ignored instead of showing wrong pictures; a run without pictures deletes an older run's picture files. Both init.app and zimprep changed.
 * 1.0.13: saves write only the data (a few KB) over the existing file instead of rewriting all 64 KB: quicker and much less writing to the card.
 * 1.0.12: the device never grows or recreates a save file (a cut-off save left an empty file that froze the next save); a failed save is not retried in a loop (that kept the unit awake); device logging no longer uses the unreliable printf.
 * 1.0.11: zimprep makes each wiki's NAME.HIS and NAME.EXT in advance, and the release has an empty ZWSTATE.DAT: creating files on a nearly full card made the WikiReader freeze or go blank (its FAT code searches the whole card for free space).

@@ -3,6 +3,8 @@
  */
 #include <string.h>
 #include "pic.h"
+#define ZSTD_STATIC_LINKING_ONLY
+#include "zstd.h"
 
 uint32_t pic_src_hash(const char *s, uint32_t n)
 {
@@ -35,7 +37,7 @@ uint32_t pic_src_hash(const char *s, uint32_t n)
 	return h;
 }
 
-int pic_open(pic_file_t *p, const zw_io_t *io, const uint8_t *uuid)
+int pic_open(pic_file_t *p, const zw_io_t *io, const uint8_t *uuid, uint32_t entries)
 {
 	uint8_t hdr[PIC_HDR];
 	int r;
@@ -43,10 +45,13 @@ int pic_open(pic_file_t *p, const zw_io_t *io, const uint8_t *uuid)
 	p->io = *io;
 	if ((r = zw_io_read(io, 0, hdr, PIC_HDR)) < 0)
 		return r;
-	if (zw_rd32(hdr) != PIC_MAGIC || zw_rd32(hdr + 4) != PIC_VERSION)
+	p->version = zw_rd32(hdr + 4);
+	if (zw_rd32(hdr) != PIC_MAGIC || p->version < 1 || p->version > PIC_VERSION)
 		return ZW_EFORMAT;
 	if (uuid && memcmp(hdr + 28, uuid, 16) != 0)
 		return ZW_EFORMAT;	/* made from another ZIM */
+	if (p->version >= 2 && entries && zw_rd32(hdr + 52) && zw_rd32(hdr + 52) != entries)
+		return ZW_EFORMAT;	/* another build of it (other numbering) */
 	p->articles = zw_rd32(hdr + 8);
 	p->mode = zw_rd32(hdr + 44);
 	if ((uint64_t)PIC_HDR + (uint64_t)p->articles * 12 > io->size)
@@ -108,9 +113,46 @@ int pic_find(const pic_set_t *s, uint32_t hash)
 	return -1;
 }
 
+static void *pic_zalloc(void *opaque, size_t size)
+{
+	(void)opaque;
+	return zw_alloc(size);
+}
+
+static void pic_zfree(void *opaque, void *q)
+{
+	(void)opaque;
+	zw_free(q);
+}
+
 int pic_bits(pic_file_t *p, const pic_set_t *s, int k, uint8_t *out)
 {
+	static ZSTD_DCtx *dctx;
+	static uint8_t cbuf[((PIC_MAX_W + 7) >> 3) * PIC_MAX_H];
+	uint32_t size, csize;
+	uint64_t off;
+	size_t r;
+	int e;
 	if (k < 0 || (uint32_t)k >= s->n)
 		return ZW_ERANGE;
-	return zw_io_read(&p->io, s->off[k], out, pic_bitmap_size(s->w[k], s->h[k]));
+	size = pic_bitmap_size(s->w[k], s->h[k]);
+	off = s->off[k];
+	csize = p->version >= 2 ? (uint32_t)(off >> 40) : 0;
+	if (p->version >= 2)
+		off &= PIC_OFF_MASK;
+	if (!csize)
+		return zw_io_read(&p->io, off, out, size);
+	if (csize > sizeof(cbuf))
+		return ZW_EFORMAT;
+	if ((e = zw_io_read(&p->io, off, cbuf, csize)) < 0)
+		return e;
+	if (!dctx) {
+		static const ZSTD_customMem mem = { pic_zalloc, pic_zfree, NULL };
+		if (!(dctx = ZSTD_createDCtx_advanced(mem)))
+			return ZW_ENOMEM;
+	}
+	r = ZSTD_decompressDCtx(dctx, out, size, cbuf, csize);
+	if (ZSTD_isError(r) || r != size)
+		return ZW_EFORMAT;
+	return ZW_OK;
 }

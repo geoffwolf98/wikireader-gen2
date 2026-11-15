@@ -357,6 +357,26 @@ PY
 	rm -rf "$P/none"
 	$B/zimprep --recluster 64 --level 3 "$P/pictest.zim" "$P/none" > /dev/null 2>&1
 	[ ! -e "$P/none/WIKI.P00" ] && ok "no pictures unless asked" || bad "no pictures unless asked"
+	# --add-pictures: the same files as making them with the wiki
+	rm -rf "$P/add" && cp -r "$P/none" "$P/add"
+	$B/zimprep --add-pictures all "$P/pictest.zim" "$P/add" > "$P/add.log" 2>&1 &&
+	cmp -s "$P/add/WIKI.P00" "$P/all/WIKI.P00" && cmp -s "$P/add/WIKI.Z00" "$P/none/WIKI.Z00" \
+		&& ok "--add-pictures to a prepared wiki" || { bad "--add-pictures to a prepared wiki"; cat "$P/add.log"; }
+	# ... refused for a wiki made from another ZIM
+	! $B/zimprep --add-pictures lead "$CLIMATE" "$P/add" > "$P/add2.log" 2>&1 &&
+	grep -q "another ZIM" "$P/add2.log" && cmp -s "$P/add/WIKI.P00" "$P/all/WIKI.P00" \
+		&& ok "--add-pictures refuses another ZIM's wiki" || { bad "--add-pictures refuses another ZIM's wiki"; cat "$P/add2.log"; }
+	# pictures twice (originals in .Z and bitmaps in .P): refused
+	! $B/zimprep --recluster 64 --keep-images --pictures lead "$P/pictest.zim" "$P/kp" > "$P/kp.log" 2>&1 &&
+	[ ! -e "$P/kp/WIKI.Z00" ] \
+		&& ok "--keep-images with --pictures refused" || { bad "--keep-images with --pictures refused"; cat "$P/kp.log"; }
+	# a run without pictures removes an older run's picture files
+	cp "$P/all/WIKI.P00" "$P/none/"
+	$B/zimprep --recluster 64 --level 3 "$P/pictest.zim" "$P/none" > /dev/null 2>&1
+	[ ! -e "$P/none/WIKI.P00" ] && ok "old picture files removed" || bad "old picture files removed"
+	# compressed bitmaps (version 2)
+	python3 tests/picdump.py "$P/all/WIKI" | grep -q "version 2, [1-9][0-9]* compressed" \
+		&& ok "picture bitmaps compressed" || bad "picture bitmaps compressed"
 	# old style ZIM (A/ and I/ namespaces): the home page's pictures
 	if [ -f "$ZIM_TESTS/withns/wikipedia_en_climate_change_mini_2024-06.zim" ]; then
 		rm -rf "$P/old"
@@ -472,6 +492,19 @@ EOF2
 	rm -rf "$P/state"
 	$B/zimwiki-headless "$P/card2.img" "$P/app2.txt" "$P/state" > "$P/app2.log" 2>&1 \
 		&& ok "pictures of another ZIM ignored" || { bad "pictures of another ZIM ignored"; cat "$P/app2.log"; }
+	# ... and those of another build of the same ZIM (other numbering:
+	# made with --keep-images), which version 1 files could not tell
+	rm -rf "$P/kp2"
+	$B/zimprep --recluster 64 --level 3 --keep-images "$P/pictest.zim" "$P/kp2" > /dev/null 2>&1
+	$B/zimprep --add-pictures all "$P/pictest.zim" "$P/kp2" > /dev/null 2>&1
+	mkdir -p "$P/card3/WIKI"
+	cp "$P/none"/WIKI.* "$P/card3/WIKI/"
+	cp "$P/kp2/WIKI.P00" "$P/card3/WIKI/"
+	sh tests/mkcard.sh "$P/card3.img" 32 > /dev/null 2>&1
+	MTOOLS_SKIP_CHECK=1 mcopy -s -i "$P/card3.img@@1M" "$P/card3/WIKI" ::WIKI
+	rm -rf "$P/state"
+	$B/zimwiki-headless "$P/card3.img" "$P/app2.txt" "$P/state" > "$P/app3.log" 2>&1 \
+		&& ok "pictures of another build ignored" || { bad "pictures of another build ignored"; cat "$P/app3.log"; }
 else
 	echo "skip  pictures (needs ZIM_TESTS, libzim and Pillow for Python, libwebp)"
 fi

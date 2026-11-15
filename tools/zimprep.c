@@ -15,10 +15,12 @@
  *   --pictures lead|all  also make NAME.P00... with the articles' pictures
  *                 as 1-bit bitmaps for the WikiReader: the first picture
  *                 of each article, or all of them (default: none)
- *   --keep-images keep the pictures when reclustering (left out by
- *                 default, with redirects to them: the WikiReader shows
- *                 no pictures, so a "maxi" ZIM comes out about the size of
- *                 a "nopic" one)
+ *   --add-pictures lead|all  add NAME.P00... to a wiki already prepared
+ *                 in OUTDIR from this INPUT (no reclustering again)
+ *   (--keep-images, not listed: keep the original pictures inside the
+ *                 reclustered ZIM too, for a ZIM that Kiwix can still show
+ *                 with pictures.  The WikiReader cannot use them, so they
+ *                 only take space; refused with --pictures)
  *
  * Writes OUTDIR/NAME.IDX (title search index) and OUTDIR/NAME.Z00,
  * NAME.Z01, ... (the ZIM split into pieces FAT32 can hold).  Copy the
@@ -327,13 +329,78 @@ static void placeholder(const char *dir, const char *name, const char *ext)
 	fclose(f);
 }
 
+/* NAME.P00... of an older run */
+static void remove_pictures(const char *outdir, const char *upname)
+{
+	char p[4200];
+	int i;
+	for (i = 0; i < 100; ++i) {
+		snprintf(p, sizeof(p), "%s/%s.P%02d", outdir, upname, i);
+		unlink(p);
+	}
+}
+
+/* --add-pictures: the wiki in outdir must be this ZIM prepared by
+ * zimprep; its renumbering is worked out again (a quick pass) and
+ * checked against it before the pictures are made */
+static int add_pictures_to(zim_t *z, const char *outdir, const char *upname, int mode, int threads,
+			   uint32_t shift)
+{
+	host_files_t pf;
+	zim_t old;
+	char base[4200];
+	uint32_t *map = NULL, n = 0, i, step, checked = 0, npics = 0;
+	snprintf(base, sizeof(base), "%s/%s", outdir, upname);
+	if (host_files_open_pieces(&pf, base, 'Z') < 0)
+		die("no %s.Z00 here: make the wiki first (zimprep --recluster ...)", base);
+	if (zim_open(&old, &pf.io) < 0)
+		die("%s.Z00... is not a ZIM this tool understands", base);
+	if (memcmp(old.uuid, z->uuid, 16) != 0)
+		die("%s was made from another ZIM file", base);
+	fprintf(stderr, "checking %s against the input\n", base);
+	if (old.entry_count == z->entry_count) {
+		/* nothing was left out: made without --recluster, or with
+		 * --keep-images */
+		map = NULL;
+		n = z->entry_count;
+		fprintf(stderr, "note: this wiki still holds the original pictures in its .Z files "
+			"(made without --recluster, or with --keep-images); the WikiReader does not "
+			"use them\n");
+	} else {
+		map = image_map(z, &n, &npics, NULL);
+		if (!map || n != old.entry_count)
+			die("%s has a different number of entries than this zimprep would make: "
+			    "made by another version or with other options? Prepare it again", base);
+	}
+	/* the same entries at the same numbers: a sample through the file */
+	step = z->entry_count / 4000 ? z->entry_count / 4000 : 1;
+	for (i = 0; i < z->entry_count; i += step) {
+		zim_dirent_t a, b;
+		uint32_t to = map ? map[i] : i;
+		if (to == ZIM_NONE)
+			continue;
+		if (zim_dirent(z, i, &a) < 0 || zim_dirent(&old, to, &b) < 0 ||
+		    a.ns != b.ns || strcmp(a.url, b.url) != 0)
+			die("%s does not match the input (entry numbers differ): prepare it again", base);
+		checked++;
+	}
+	fprintf(stderr, "%u entries match\n", checked);
+	zim_close(&old);
+	host_files_close(&pf);
+	if (make_pictures(z, outdir, upname, mode, threads, map, n, shift) < 0)
+		return 1;
+	free(map);
+	fprintf(stderr, "done: copy %s.P* to the SD card, next to the wiki's other files\n", base);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *name = "WIKI", *input = NULL, *outdir = NULL;
 	uint32_t chunk_mb = 2048, shift, chunks, i;
 	int index_only = 0, a, r, level = 19, threads = 0, keep_fulltext = 0, keep_images = 0;
-	int pictures = 0;
-	uint32_t recluster_kb = 0;
+	int pictures = 0, add_pictures = 0;
+	uint32_t recluster_kb = 0, prep_entries = 0;
 	host_files_t in;
 	zim_t z;
 	char path[4096], upname[16];
@@ -358,7 +425,10 @@ int main(int argc, char **argv)
 			keep_fulltext = 1;
 		else if (strcmp(argv[a], "--keep-images") == 0)
 			keep_images = 1;
-		else if (strcmp(argv[a], "--pictures") == 0 && a + 1 < argc) {
+		else if ((strcmp(argv[a], "--pictures") == 0 || strcmp(argv[a], "--add-pictures") == 0) &&
+			 a + 1 < argc) {
+			if (!strcmp(argv[a], "--add-pictures"))
+				add_pictures = 1;
 			a++;
 			if (!strcmp(argv[a], "lead"))
 				pictures = PIC_MODE_LEAD;
@@ -367,7 +437,8 @@ int main(int argc, char **argv)
 			else if (!strcmp(argv[a], "none"))
 				pictures = 0;
 			else {
-				fprintf(stderr, "zimprep: --pictures lead, all or none\n");
+				fprintf(stderr, "zimprep: %s lead, all or none\n",
+					add_pictures ? "--add-pictures" : "--pictures");
 				return 2;
 			}
 			if (pictures && !pictures_supported()) {
@@ -386,11 +457,17 @@ int main(int argc, char **argv)
 	}
 	if (!input || !outdir) {
 		fprintf(stderr, "usage: zimprep [-n NAME] [--chunk-mb N] [--index-only] [--recluster [KB]] [--level N]\n"
-			"               [--threads N] [--keep-fulltext] [--keep-images] [--pictures lead|all]\n"
-			"               INPUT.zim OUTDIR\n"
+			"               [--threads N] [--keep-fulltext] [--pictures lead|all] INPUT.zim OUTDIR\n"
+			"       zimprep [-n NAME] --add-pictures lead|all INPUT.zim OUTDIR\n"
+			"               (adds pictures to the wiki made from INPUT.zim in OUTDIR)\n"
 			"       zimprep --version\n");
 		return 2;
 	}
+	if (keep_images && pictures)
+		die("%s", "--keep-images would also keep the original pictures in the .Z files, which the "
+		    "WikiReader cannot show (they only take space): leave it out");
+	if (add_pictures && !pictures)
+		die("%s", "--add-pictures needs lead or all");
 	if (strlen(name) < 1 || strlen(name) > 8)
 		die("name must be 1-8 characters: %s", name);
 	for (i = 0; name[i]; ++i) {
@@ -409,6 +486,8 @@ int main(int argc, char **argv)
 		die("cannot open %s", input);
 	if ((r = zim_open(&z, &in.io)) < 0)
 		die("%s is not a ZIM file this tool understands", input);
+	if (add_pictures)
+		return add_pictures_to(&z, outdir, upname, pictures, threads, shift);
 	chunks = (uint32_t)((in.io.size + ((uint64_t)1 << shift) - 1) >> shift);
 	if (chunks > 100)
 		die("too many chunks; use a bigger --chunk-mb", "");
@@ -459,8 +538,11 @@ int main(int argc, char **argv)
 		if (!index_only)
 			write_chunks(&in, outdir, upname, shift, chunks);
 	}
+	prep_entries = g_map ? g_entries : z.entry_count;
+	if (!index_only && !pictures)
+		remove_pictures(outdir, upname);	/* an older run's: wrong numbering now */
 	if (pictures && !index_only &&
-	    make_pictures(&z, outdir, upname, pictures, threads, g_map, shift) < 0)
+	    make_pictures(&z, outdir, upname, pictures, threads, g_map, prep_entries, shift) < 0)
 		return 1;
 	placeholder(outdir, upname, ".HIS");
 	placeholder(outdir, upname, ".EXT");

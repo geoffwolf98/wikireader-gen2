@@ -11,15 +11,20 @@
  * File layout, little-endian, split into pieces of 2^shift bytes like
  * the ZIM (NAME.P00 ...):
  *   header (64 bytes):
- *     0  "ZWPI"       4  version (1)      8  articles N
+ *     0  "ZWPI"       4  version (1 or 2) 8  articles N
  *     12 chunk shift  16 pieces           20 total size (u64)
  *     28 ZIM uuid (16 bytes)              44 mode (1 lead, 2 all)
- *     48 pictures (bitmaps stored)        52..63 reserved
+ *     48 pictures (bitmaps stored)
+ *     52 (version 2) entries in the prepared ZIM: the pictures belong to
+ *        that build's numbering, so a different build is refused
+ *     56..63 reserved
  *   index (from 64): N x 12 bytes, sorted by entry:
  *     u32 article entry (the prepared ZIM's numbering), u64 record offset
  *   record: u8 count, 3 reserved, then count x 16 bytes:
  *     u32 src hash, u16 width, u16 height, u64 bitmap offset
- *     (width 0: a picture zimprep could not convert)
+ *     (width 0: a picture zimprep could not convert).  Version 2: the
+ *     offset's low 40 bits; the top 24 bits, when not 0, are the size of
+ *     the bitmap compressed as one zstd frame (else it is stored as is)
  *   bitmaps: shared by every article that shows the same picture
  */
 #ifndef ZW_PIC_H
@@ -28,7 +33,8 @@
 #include "zw.h"
 
 #define PIC_MAGIC     0x4950575au	/* "ZWPI" */
-#define PIC_VERSION   1
+#define PIC_VERSION   2		/* reads 1 too */
+#define PIC_OFF_MASK  ((((uint64_t)1) << 40) - 1)
 #define PIC_HDR       64
 #define PIC_MAX       32		/* pictures per article */
 #define PIC_MAX_W     228		/* fits the text column */
@@ -49,6 +55,7 @@ typedef struct pic_file {
 	zw_io_t io;
 	uint32_t articles;
 	uint32_t mode;
+	uint32_t version;
 } pic_file_t;
 
 typedef struct pic_set {
@@ -60,7 +67,9 @@ typedef struct pic_set {
 
 /* check the header; uuid is the ZIM's (pictures made from another ZIM
  * are refused) */
-int pic_open(pic_file_t *p, const zw_io_t *io, const uint8_t *uuid);
+/* uuid and entries: the prepared ZIM's (version 2 files are refused for
+ * another build of the same ZIM) */
+int pic_open(pic_file_t *p, const zw_io_t *io, const uint8_t *uuid, uint32_t entries);
 /* the pictures of one article (none: n = 0) */
 int pic_article(pic_file_t *p, uint32_t entry, pic_set_t *s);
 /* index of the picture with this src hash, or -1 */

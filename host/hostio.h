@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include "../src/zw.h"
 
-#define HOST_MAX_FILES 64
+#define HOST_MAX_FILES 100
 
 typedef struct host_files {
 	zw_io_t io;
@@ -17,6 +17,8 @@ typedef struct host_files {
 /* open a ZIM file, or a split set when `path` is the name without the
  * trailing "aa"/"ab"... (e.g. "wiki.zim" for wiki.zimaa, wiki.zimab) */
 int host_files_open(host_files_t *f, const char *path);
+/* the pieces base.Z00, base.Z01, ... (letter 'Z') as one file */
+int host_files_open_pieces(host_files_t *f, const char *base, char letter);
 void host_files_close(host_files_t *f);
 
 extern int zw_log_enabled;

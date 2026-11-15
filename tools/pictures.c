@@ -23,6 +23,7 @@
 #include <pthread.h>
 #include "pictures.h"
 #include "../src/pic.h"
+#include <zstd.h>
 
 #ifdef ZW_HAVE_WEBP
 #include <webp/decode.h>
@@ -53,9 +54,10 @@ int pictures_supported(void)
 
 #ifndef ZW_HAVE_WEBP
 long make_pictures(zim_t *z, const char *outdir, const char *name, int mode, int threads,
-		   const uint32_t *map, uint32_t shift)
+		   const uint32_t *map, uint32_t entries, uint32_t shift)
 {
 	(void)z; (void)outdir; (void)name; (void)mode; (void)threads; (void)map; (void)shift;
+	(void)entries;
 	fprintf(stderr, "zimprep: built without picture support (install libwebp-dev and rebuild)\n");
 	return -1;
 }
@@ -379,6 +381,8 @@ typedef struct job {
 	uint32_t raw_len;
 	uint8_t *bits;		/* result, or NULL */
 	uint16_t w, h;
+	uint8_t *cbits;		/* the same compressed (NULL: no smaller) */
+	uint32_t clen;
 } job_t;
 
 /* fit (sw, sh) inside the column, never enlarging */
@@ -526,6 +530,20 @@ static void convert(job_t *j)
 	j->w = (uint16_t)tw;
 	j->h = (uint16_t)th;
 	free(g);
+	/* each bitmap its own zstd frame (about a third smaller for photos;
+	 * dithering is mostly noise), kept only when it saves something */
+	if (j->bits) {
+		uint32_t sz = pic_bitmap_size(j->w, j->h);
+		size_t cap = ZSTD_compressBound(sz), n;
+		j->cbits = malloc(cap);
+		n = j->cbits ? ZSTD_compress(j->cbits, cap, j->bits, sz, 19) : 0;
+		if (!j->cbits || ZSTD_isError(n) || n + 16 >= sz) {
+			free(j->cbits);
+			j->cbits = NULL;
+		} else {
+			j->clen = (uint32_t)n;
+		}
+	}
 }
 
 typedef struct pool {
@@ -610,9 +628,10 @@ static int cmp_img_entry(const void *a, const void *b)
 }
 
 long make_pictures(zim_t *z, const char *outdir, const char *name, int mode, int threads,
-		   const uint32_t *map, uint32_t shift)
+		   const uint32_t *map, uint32_t entries, uint32_t shift)
 {
 	uint32_t i, *order, done_imgs = 0, nconv = 0;
+	uint64_t raw_total = 0;
 	uint64_t pos, rec_pos, bm_start;
 	pw_t w;
 	pool_t pool;
@@ -719,11 +738,24 @@ long make_pictures(zim_t *z, const char *outdir, const char *name, int mode, int
 			img_t *im = &imgs[j->img];
 			if (j->bits) {
 				uint32_t sz = pic_bitmap_size(j->w, j->h);
-				pw_write(&w, pos, j->bits, sz);
+				if (pos > PIC_OFF_MASK) {
+					fprintf(stderr, "zimprep: picture file too big\n");
+					exit(1);
+				}
 				im->w = j->w;
 				im->h = j->h;
-				im->off = pos;
-				pos += sz;
+				if (j->cbits) {
+					pw_write(&w, pos, j->cbits, j->clen);
+					im->off = pos | (uint64_t)j->clen << 40;
+					pos += j->clen;
+					raw_total += sz;
+					free(j->cbits);
+				} else {
+					pw_write(&w, pos, j->bits, sz);
+					im->off = pos;
+					pos += sz;
+					raw_total += sz;
+				}
 				nconv++;
 				free(j->bits);
 			}
@@ -783,12 +815,15 @@ long make_pictures(zim_t *z, const char *outdir, const char *name, int mode, int
 	memcpy(hdr + 28, z->uuid, 16);
 	zw_wr32(hdr + 44, (uint32_t)mode);
 	zw_wr32(hdr + 48, nconv);
+	zw_wr32(hdr + 52, entries);
 	pw_write(&w, 0, hdr, PIC_HDR);
 	for (i = 0; i < 100; ++i)
 		if (w.fd[i] >= 0)
 			close(w.fd[i]);
-	fprintf(stderr, "pictures: %u articles, %u pictures (%u could not be used), %llu bytes in %s.P00...\n",
-		narts, nconv, nimgs - nconv, (unsigned long long)w.size, w.base);
+	fprintf(stderr, "pictures: %u articles, %u pictures (%u could not be used), %llu bytes in %s.P00... "
+		"(bitmaps %llu bytes, %llu before compression)\n",
+		narts, nconv, nimgs - nconv, (unsigned long long)w.size, w.base,
+		(unsigned long long)(pos - bm_start), (unsigned long long)raw_total);
 	free(order);
 	free(pool.jobs);
 	free(imgs);

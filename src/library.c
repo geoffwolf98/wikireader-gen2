@@ -390,7 +390,7 @@ int lib_open(library_t *L, fat_vol_t *v, const lib_info_t *info)
 		L->pic_io.ctx = L;
 		L->pic_io.size = ptotal;
 		/* pictures that do not belong to this ZIM are just not used */
-		L->have_pics = pic_open(&L->pics, &L->pic_io, L->zim.uuid) == ZW_OK;
+		L->have_pics = pic_open(&L->pics, &L->pic_io, L->zim.uuid, L->zim.entry_count) == ZW_OK;
 		if (!L->have_pics)
 			zw_log("pictures not used (made from another ZIM?)");
 	}

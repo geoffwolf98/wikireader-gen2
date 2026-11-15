@@ -426,6 +426,46 @@ static uint8_t *title_list(zim_t *z)
 	return tl;
 }
 
+uint32_t *image_map(zim_t *z, uint32_t *out_entries, uint32_t *out_pics, uint32_t *out_redirs)
+{
+	uint32_t i, next = 0, npics = 0, npicredir = 0;
+	uint32_t *map = malloc(sizeof(uint32_t) * (z->entry_count ? z->entry_count : 1));
+	for (i = 0; i < z->entry_count; ++i) {
+		zim_dirent_t d;
+		map[i] = 0;
+		/* articles' pictures (C/..., or I/... in old ZIMs);
+		 * metadata (the Kiwix icon, M/Illustration...) stays */
+		if (zim_dirent(z, i, &d) == 0 && d.ns != 'M' &&
+		    d.mime != ZIM_MIME_REDIRECT && d.mime != ZIM_MIME_LINKTARGET &&
+		    d.mime != ZIM_MIME_DELETED && mime_is(z, d.mime, "image/")) {
+			map[i] = ZIM_NONE;
+			npics++;
+		}
+	}
+	for (i = 0; i < z->entry_count; ++i) {
+		zim_dirent_t d, t;
+		uint32_t final;
+		if (zim_dirent(z, i, &d) == 0 && d.mime == ZIM_MIME_REDIRECT &&
+		    zim_follow(z, i, &final, &t) == 0 && final < z->entry_count &&
+		    map[final] == ZIM_NONE) {
+			map[i] = ZIM_NONE;
+			npicredir++;
+		}
+	}
+	for (i = 0; i < z->entry_count; ++i)
+		map[i] = map[i] == ZIM_NONE ? ZIM_NONE : next++;
+	*out_entries = next;
+	if (out_pics)
+		*out_pics = npics;
+	if (out_redirs)
+		*out_redirs = npicredir;
+	if (!npics && !npicredir) {
+		free(map);
+		map = NULL;
+	}
+	return map;
+}
+
 int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, int level,
 	      int threads, int keep_fulltext, int keep_images, uint32_t **out_map,
 	      uint32_t *out_entries, uint64_t *out_size, uint32_t *out_chunks)
@@ -470,39 +510,8 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 	/* 0. pictures, and redirects that end at one, are left out (the
 	 * WikiReader shows no pictures); the rest are renumbered in order,
 	 * which keeps the URL order the ZIM format requires */
-	if (!keep_images) {
-		uint32_t next = 0;
-		map = malloc(sizeof(uint32_t) * (z->entry_count ? z->entry_count : 1));
-		for (i = 0; i < z->entry_count; ++i) {
-			zim_dirent_t d;
-			map[i] = 0;
-			/* articles' pictures (C/..., or I/... in old ZIMs);
-			 * metadata (the Kiwix icon, M/Illustration...) stays */
-			if (zim_dirent(z, i, &d) == 0 && d.ns != 'M' &&
-			    d.mime != ZIM_MIME_REDIRECT && d.mime != ZIM_MIME_LINKTARGET &&
-			    d.mime != ZIM_MIME_DELETED && mime_is(z, d.mime, "image/")) {
-				map[i] = ZIM_NONE;
-				npics++;
-			}
-		}
-		for (i = 0; i < z->entry_count; ++i) {
-			zim_dirent_t d, t;
-			uint32_t final;
-			if (zim_dirent(z, i, &d) == 0 && d.mime == ZIM_MIME_REDIRECT &&
-			    zim_follow(z, i, &final, &t) == 0 && final < z->entry_count &&
-			    map[final] == ZIM_NONE) {
-				map[i] = ZIM_NONE;
-				npicredir++;
-			}
-		}
-		for (i = 0; i < z->entry_count; ++i)
-			map[i] = map[i] == ZIM_NONE ? ZIM_NONE : next++;
-		nentries = next;
-		if (!npics && !npicredir) {
-			free(map);
-			map = NULL;
-		}
-	}
+	if (!keep_images)
+		map = image_map(z, &nentries, &npics, &npicredir);
 
 	/* 1. which entries use which blob, in cluster order */
 	for (i = 0; i < z->entry_count; ++i) {

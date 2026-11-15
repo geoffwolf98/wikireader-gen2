@@ -18,6 +18,7 @@
 
 enum line_deco {
 	LD_NONE, LD_BULLET, LD_NUMBER, LD_RULE, LD_HEAD_RULE,
+	LD_PIC,		/* a picture: number = doc.pics index, deco_x = left */
 };
 
 typedef struct lay_frag {
@@ -62,6 +63,7 @@ typedef struct layout {
 	int prev_kind;
 	int done;
 	uint8_t large;		/* drawn with the large font set */
+	uint8_t pics;		/* pictures shown (the Pictures switch) */
 } layout_t;
 
 /* lay out the whole document */
@@ -73,6 +75,11 @@ int lay_begin(layout_t *l, const doc_t *d);
 int lay_more(layout_t *l, int32_t until_y, uint32_t max_blocks);
 /* font size for layouts begun from now on: 0 normal, 1 large */
 void lay_set_large(int on);
+/* the Pictures switch, for layouts begun from now on */
+void lay_set_pictures(int on);
+/* where pictures' bitmaps come from (NULL: drawn as an empty frame) */
+typedef const uint8_t *(*lay_pic_fn)(const doc_t *d, int k);
+void lay_set_pic_source(lay_pic_fn fn);
 void lay_free(layout_t *l);
 
 /* copy rows [top, top+rows) of the rendered document into buf

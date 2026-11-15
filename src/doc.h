@@ -8,11 +8,14 @@
 #define DOC_H
 
 #include "zw.h"
+#include "pic.h"
 
 enum block_kind {
 	BK_PARA, BK_TITLE, BK_H2, BK_H3, BK_H4, BK_ITEM, BK_DT, BK_DD,
 	BK_QUOTE, BK_ROW, BK_CAPTION, BK_RULE, BK_SMALL,
 	BK_MROW,		/* 2nd and later rows of a display matrix: no gap above */
+	BK_PIC,			/* a picture: number = index into doc.pics */
+	BK_PICCAP,		/* a picture's caption: small, centred, shown with the picture */
 };
 
 enum run_flags {
@@ -53,6 +56,8 @@ typedef struct doc {
 	 * the section it names ("Left quasi-reflexivity") */
 	uint16_t refresh_link;
 	char refresh_frag[96];
+	/* the article's pictures (from the picture file; n = 0: none) */
+	pic_set_t pics;
 	/* footnote anchors: u32 text offset + name + NUL, packed */
 	char *anchors;
 	uint32_t anchors_len, anchors_cap;
@@ -66,6 +71,9 @@ typedef struct doc {
  * two (ZWSTATE.DAT byte 14); html only uses it to measure maths columns */
 #define HTML_LARGE 4
 void html_set_options(int opts);
+/* the pictures of the article about to be converted (NULL: none): an
+ * <img> whose src hash is in the set becomes a BK_PIC block */
+void html_set_pictures(const pic_set_t *s);
 void doc_add_anchor(doc_t *d, const char *id, uint32_t n);
 int doc_find_anchor(const doc_t *d, const char *name, uint32_t *off);
 

@@ -3,6 +3,7 @@
  *
  *   prepared:  NAME.IDX + NAME.Z00, NAME.Z01, ...  (from zimprep)
  *   plain:     NAME.ZIM  (no search index, single file up to 4 GiB)
+ *   pictures:  NAME.P00, NAME.P01, ...  (zimprep --pictures, optional)
  *
  * either in the top folder or in a folder of their own (one level down,
  * e.g. MATHS/MATHS.IDX).  Its history (NAME.HIS) and file map (NAME.EXT)
@@ -18,6 +19,7 @@
 #include "zim.h"
 #include "index.h"
 #include "fat.h"
+#include "pic.h"
 
 #define LIB_MAX       32	/* wikis on one card; only one is open at a time */
 #define LIB_MAX_CHUNK 100
@@ -44,9 +46,13 @@ typedef struct library {
 	fat_file_t idx_file;
 	zw_io_t idx_io;
 	idx_t idx;
-	fat_file_t chunk[LIB_MAX_CHUNK];
+	fat_file_t chunk[LIB_MAX_CHUNK];	/* the ZIM's pieces, then the pictures' */
 	uint8_t chunk_ready[LIB_MAX_CHUNK];
-	uint32_t nchunks, shift;
+	uint32_t nchunks, shift;	/* the ZIM's */
+	uint32_t npchunks, pshift;	/* the pictures' (chunk[nchunks...]) */
+	zw_io_t pic_io;
+	pic_file_t pics;
+	int have_pics;
 	zw_io_t zim_io;
 	zim_t zim;
 	int ext_dirty;		/* extent cache needs saving */

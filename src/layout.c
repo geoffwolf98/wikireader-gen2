@@ -52,6 +52,7 @@ static int space_before(int kind, int prev)
 	case BK_CAPTION: return 7;
 	case BK_RULE: return 5;
 	case BK_SMALL: return 10;
+	case BK_PICCAP: return 2;
 	}
 	return prev >= BK_TITLE && prev <= BK_H4 ? 3 : 6;
 }
@@ -109,6 +110,18 @@ static void end_line(builder_t *b)
 #define RFONT(b, r) ((b)->l->large ? font_big((r)->font) : (r)->font)
 
 static int lay_large_now;
+static int lay_pics_now = 1;
+static lay_pic_fn lay_pic_src;
+
+void lay_set_pictures(int on)
+{
+	lay_pics_now = on != 0;
+}
+
+void lay_set_pic_source(lay_pic_fn fn)
+{
+	lay_pic_src = fn;
+}
 
 void lay_set_large(int on)
 {
@@ -239,6 +252,31 @@ static void layout_block(builder_t *b, const doc_block_t *bl, int prev_kind)
 	int kind = bl->kind;
 	uint32_t first_line;
 
+	if (kind == BK_PIC) {
+		/* a picture: a line of its height, centred in the column */
+		const pic_set_t *ps = &d->pics;
+		lay_line_t *ln;
+		int k = bl->number, w, h;
+		if (!b->l->pics || k >= (int)ps->n)
+			return;
+		w = ps->w[k];
+		h = ps->h[k];
+		b->y += 6;
+		new_line(b, kind);
+		if (b->err)
+			return;
+		ln = &b->l->lines[b->line_index];
+		ln->deco = LD_PIC;
+		ln->number = (uint16_t)k;
+		ln->deco_x = (int16_t)(MARGIN_L + (LAYOUT_WIDTH - MARGIN_L - MARGIN_R - w) / 2);
+		ln->h = (uint16_t)h;
+		ln->base = 0;
+		b->line_open = 0;
+		b->y = ln->y + h;
+		return;
+	}
+	if (kind == BK_PICCAP && !b->l->pics)
+		return;
 	if (indent > 72)
 		indent = 72;
 	b->y += space_before(kind, prev_kind);
@@ -335,6 +373,21 @@ static void layout_block(builder_t *b, const doc_block_t *bl, int prev_kind)
 			place_word(b, kind, segs, nseg);
 	}
 	end_line(b);
+	if (kind == BK_PICCAP) {
+		/* centred, like the picture above it */
+		uint32_t j, f;
+		for (j = first_line; j < b->l->nlines; ++j) {
+			lay_line_t *ln = &b->l->lines[j];
+			lay_frag_t *last;
+			int dx;
+			if (!ln->nfrag)
+				continue;
+			last = &b->l->frags[ln->first + ln->nfrag - 1];
+			dx = (b->right - (last->x + last->w)) / 2;
+			for (f = 0; f < ln->nfrag && dx > 0; ++f)
+				b->l->frags[ln->first + f].x = (int16_t)(b->l->frags[ln->first + f].x + dx);
+		}
+	}
 	if (b->l->nlines > first_line) {
 		lay_line_t *ln = &b->l->lines[first_line];
 		if (kind == BK_ITEM) {
@@ -357,6 +410,7 @@ int lay_begin(layout_t *l, const doc_t *d)
 	memset(l, 0, sizeof(*l));
 	l->doc = d;
 	l->large = (uint8_t)lay_large_now;
+	l->pics = (uint8_t)lay_pics_now;
 	for (i = 0; i < STRIP_CACHE; ++i)
 		l->strip_id[i] = -1;
 	l->prefetched_top = -1;
@@ -389,7 +443,8 @@ int lay_more(layout_t *l, int32_t until_y, uint32_t max_blocks)
 		if ((i & 63) == 63)
 			ZW_PROGRESS(3, i, d->nblocks);
 		layout_block(&b, &d->blocks[i], i ? l->prev_kind : -1);
-		l->prev_kind = d->blocks[i].kind;
+		if ((d->blocks[i].kind != BK_PIC && d->blocks[i].kind != BK_PICCAP) || l->pics)
+			l->prev_kind = d->blocks[i].kind;
 		l->next_block++;
 		n++;
 	}
@@ -463,6 +518,48 @@ static void draw_number(uint8_t *buf, int rows, int x_right, int base, int n, in
 		  base, font, s, (size_t)k, BLACK);
 }
 
+/* the rows of picture line ln that fall in this strip (y: its top,
+ * relative to the strip) */
+static void draw_picture(layout_t *l, const lay_line_t *ln, uint8_t *buf, int y)
+{
+	const pic_set_t *ps = &l->doc->pics;
+	int k = ln->number, w, h, stride, r, x0 = ln->deco_x;
+	const uint8_t *bits;
+	if (k >= (int)ps->n)
+		return;
+	w = ps->w[k];
+	h = ps->h[k];
+	stride = (w + 7) >> 3;
+	bits = lay_pic_src ? lay_pic_src(l->doc, k) : NULL;
+	if (!bits) {
+		/* could not be read: a frame where it would be */
+		gfx_rect(buf, SCREEN_STRIDE, STRIP_H, x0, y, w, h, BLACK);
+		return;
+	}
+	for (r = 0; r < h; ++r) {
+		int ty = y + r, c;
+		const uint8_t *src = bits + r * stride;
+		uint8_t *dst;
+		if (ty < 0)
+			continue;
+		if (ty >= STRIP_H)
+			break;
+		dst = buf + ty * SCREEN_STRIDE;
+		for (c = 0; c < stride; ++c) {
+			uint8_t v = src[c];
+			int x = x0 + c * 8, sh = x & 7;
+			if (!v)
+				continue;
+			if (c == stride - 1 && (w & 7))
+				v &= (uint8_t)(0xff << (8 - (w & 7)));
+			if (x >= 0 && (x >> 3) < SCREEN_STRIDE)
+				dst[x >> 3] |= (uint8_t)(v >> sh);
+			if (sh && x + 8 >= 0 && ((x >> 3) + 1) < SCREEN_STRIDE)
+				dst[(x >> 3) + 1] |= (uint8_t)(v << (8 - sh));
+		}
+	}
+}
+
 static void render_strip(layout_t *l, int32_t sid, uint8_t *buf)
 {
 	int32_t top = sid * STRIP_H;
@@ -502,6 +599,9 @@ static void render_strip(layout_t *l, int32_t sid, uint8_t *buf)
 		case LD_HEAD_RULE:
 			gfx_hline(buf, SCREEN_STRIDE, STRIP_H, MARGIN_L, y + ln->h - 2,
 				  LAYOUT_WIDTH - MARGIN_L - MARGIN_R, BLACK);
+			break;
+		case LD_PIC:
+			draw_picture(l, ln, buf, y);
 			break;
 		}
 		if (ln->kind == BK_QUOTE)

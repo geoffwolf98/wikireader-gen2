@@ -12,6 +12,9 @@
  *   --threads N   compression threads for --recluster (default: all CPUs)
  *   --keep-fulltext  keep Kiwix's Xapian search indexes when reclustering
  *                 (left out by default: large, slow, unused on the device)
+ *   --pictures lead|all  also make NAME.P00... with the articles' pictures
+ *                 as 1-bit bitmaps for the WikiReader: the first picture
+ *                 of each article, or all of them (default: none)
  *   --keep-images keep the pictures when reclustering (left out by
  *                 default, with redirects to them: the WikiReader shows
  *                 no pictures, so a "maxi" ZIM comes out about the size of
@@ -38,6 +41,8 @@
 #include "../src/index.h"
 #include "../host/hostio.h"
 #include "recluster.h"
+#include "pictures.h"
+#include "../src/pic.h"
 #include <unistd.h>
 
 /* recluster's renumbering (NULL: none), applied to the index */
@@ -327,6 +332,7 @@ int main(int argc, char **argv)
 	const char *name = "WIKI", *input = NULL, *outdir = NULL;
 	uint32_t chunk_mb = 2048, shift, chunks, i;
 	int index_only = 0, a, r, level = 19, threads = 0, keep_fulltext = 0, keep_images = 0;
+	int pictures = 0;
 	uint32_t recluster_kb = 0;
 	host_files_t in;
 	zim_t z;
@@ -352,6 +358,23 @@ int main(int argc, char **argv)
 			keep_fulltext = 1;
 		else if (strcmp(argv[a], "--keep-images") == 0)
 			keep_images = 1;
+		else if (strcmp(argv[a], "--pictures") == 0 && a + 1 < argc) {
+			a++;
+			if (!strcmp(argv[a], "lead"))
+				pictures = PIC_MODE_LEAD;
+			else if (!strcmp(argv[a], "all"))
+				pictures = PIC_MODE_ALL;
+			else if (!strcmp(argv[a], "none"))
+				pictures = 0;
+			else {
+				fprintf(stderr, "zimprep: --pictures lead, all or none\n");
+				return 2;
+			}
+			if (pictures && !pictures_supported()) {
+				fprintf(stderr, "zimprep: built without picture support: install libwebp-dev, then make\n");
+				return 2;
+			}
+		}
 		else if (strcmp(argv[a], "--threads") == 0 && a + 1 < argc)
 			threads = atoi(argv[++a]);
 		else if (!input)
@@ -363,7 +386,8 @@ int main(int argc, char **argv)
 	}
 	if (!input || !outdir) {
 		fprintf(stderr, "usage: zimprep [-n NAME] [--chunk-mb N] [--index-only] [--recluster [KB]] [--level N]\n"
-			"               [--threads N] [--keep-fulltext] [--keep-images] INPUT.zim OUTDIR\n"
+			"               [--threads N] [--keep-fulltext] [--keep-images] [--pictures lead|all]\n"
+			"               INPUT.zim OUTDIR\n"
 			"       zimprep --version\n");
 		return 2;
 	}
@@ -413,15 +437,15 @@ int main(int argc, char **argv)
 	fprintf(stderr, "sorting %zu titles\n", nrec);
 	qsort(recs, nrec, sizeof(rec_t), rec_cmp);
 
+	if (threads <= 0)
+		threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
+	if (threads < 1)
+		threads = 1;
+	if (threads > 64)
+		threads = 64;
 	if (recluster_kb && !index_only) {
 		uint64_t size;
 		char base[4096];
-		if (threads <= 0)
-			threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
-		if (threads < 1)
-			threads = 1;
-		if (threads > 64)
-			threads = 64;
 		snprintf(base, sizeof(base), "%s/%s", outdir, upname);
 		fprintf(stderr, "reclustering to %u KiB clusters, zstd level %d, %d threads\n",
 			recluster_kb, level, threads);
@@ -435,6 +459,9 @@ int main(int argc, char **argv)
 		if (!index_only)
 			write_chunks(&in, outdir, upname, shift, chunks);
 	}
+	if (pictures && !index_only &&
+	    make_pictures(&z, outdir, upname, pictures, threads, g_map, shift) < 0)
+		return 1;
 	placeholder(outdir, upname, ".HIS");
 	placeholder(outdir, upname, ".EXT");
 	zim_close(&z);

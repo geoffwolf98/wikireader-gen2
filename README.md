@@ -1,6 +1,6 @@
 # zimwiki: ZIM reader firmware for the Openmoko WikiReader
 
-Version 1.0.42 (released as *WikiReader Gen2*). The version and build date
+Version 1.0.44 (released as *WikiReader Gen2*). The version and build date
 are shown at the bottom of the search screen; `zimprep --version` prints
 it for the PC tool.
 
@@ -76,10 +76,12 @@ under similar names). macOS should work for the PC tools with Homebrew.
 ```sh
 # required: the PC tools (zimprep) and card tools
 sudo apt install build-essential libzstd-dev zlib1g-dev dosfstools mtools fdisk curl zip
+# recommended: pictures (zimprep --pictures; without it zimprep builds without them)
+sudo apt install libwebp-dev pkg-config
 # recommended: faster downloads, and the simulator window
 sudo apt install aria2 libsdl2-dev pkg-config
 # optional: the test suite
-sudo apt install python3 python3-pip && pip install --break-system-packages libzim
+sudo apt install python3 python3-pip python3-pil && pip install --break-system-packages 'libzim<3.8'
 # optional: checking new SD cards are genuine
 sudo apt install f3
 # only for building the WikiReader binaries yourself (prebuilt ones are in card/)
@@ -107,10 +109,11 @@ files. `rm -rf build && make` always rebuilds everything.
 
 ZIMs come from <https://library.kiwix.org> (browse) or
 <https://download.kiwix.org/zim/> (direct). Choose **nopic** where there is
-one: full text without images, which the WikiReader cannot show anyway.
-*maxi* (full text with images) works as well when it is the newer dump:
-`zimprep --recluster` leaves the pictures out, so it comes out about the
-size of the nopic one (the download is bigger). *mini* has only the
+one: full text without images. *maxi* (full text with images) works as
+well when it is the newer dump: `zimprep --recluster` leaves the pictures
+out, so it comes out about the size of the nopic one (the download is
+bigger). A maxi ZIM is also what you need for pictures on the WikiReader
+(`--pictures`, below). *mini* has only the
 introduction of each article.
 
 `tools/getzims.sh` finds the newest English ZIM of each project and its
@@ -155,6 +158,17 @@ This writes `MATHS.IDX` (the search index) and `MATHS.Z00`, `MATHS.Z01`...
   and all.
 * Time: minutes for the small wikis; one to a few hours for the full
   English Wikipedia (it prints the time of each stage).
+* `--pictures lead` or `--pictures all` (needs a *maxi* ZIM, and zimprep
+  built with libwebp-dev installed) also writes `NAME.P00`, `NAME.P01`...:
+  the article pictures turned into black and white bitmaps (dithered, at
+  most 228 x 200 pixels) that the WikiReader shows in the text where they
+  were. `lead` keeps each article's first picture (usually the infobox
+  one), `all` up to 32 per article. Icons, maths formulas (shown as text
+  already), SVG drawings and pictures under 24 pixels are left out; a
+  picture used in many articles is stored once. A picture takes about
+  4 KB (at most 5.7 KB), so the full English Wikipedia with `lead` adds
+  something like 10 to 20 GB, and `all` several times that; conversion
+  uses all CPU cores and adds to the time. The default is `none`.
 * Other options: `--chunk-mb N`, `--level N` (zstd level, default 19),
   `--threads N`, `--index-only` (rebuild just the index).
 
@@ -254,6 +268,7 @@ Notes:
 | Tap the wiki's name in the empty search bar | choose another wiki (when the card has more than one) |
 | Footnotes / Citations on the empty search screen | switch [a] notes and [1] citations on or off (from the next article; remembered). With them on, tap a marker to jump to its note, ^ to jump back |
 | Large text on the empty search screen | switch the article text between normal (Liberation 15 px) and large (18 px; titles, headings and small print grow too). Applies at once to the open page, keeping your place; remembered |
+| Pictures on the empty search screen (wikis made with `--pictures`) | switch the pictures on or off. Applies at once to the open page, keeping your place; remembered |
 | HISTORY button, short press | **Back**, like a browser: the results or list you came from, or the article you followed a link from |
 | HISTORY button, hold ½ s | list of recently read articles |
 | RANDOM button | random article (on release; in the calculator: back to where you were) |
@@ -438,6 +453,8 @@ now and then, or grifo's watchdog resets the unit after 20 s.
 * 1.0.39: power off (or auto power off) with the calculator open came back on the search screen instead of the article underneath, so RANDOM then gave a random article. The screen under the calculator is now saved. New test for it (PC and emulated).
 * 1.0.40: a button press could be ignored after the device had slept: grifo stops the timer behind the app's clock while the CPU sleeps, so the next press looked like contact bounce of the last release (within 80 ms on the stopped clock). Most visible as RANDOM not leaving the calculator after holding RANDOM to open it, but SEARCH and HISTORY could miss a press the same way. The app now stays awake for the 80 ms after a release. zimwiki-headless now stops its clock too whenever the app would sleep (ZW_CLOCK_RUNS=1 for the old behaviour); new test for it.
 * 1.0.41: zimprep --recluster leaves pictures out by default (and redirects to them), so a "maxi" ZIM gives about the same card files as a "nopic" one; --keep-images keeps them. The entries are renumbered, with the ZIM's title lists (X/listing/titleOrdered), redirects, main page and the WikiReader's index to match; metadata (the Kiwix icon) stays. Checked with libzim (integrity check, every entry by path, redirects, listings) on old and new style ZIMs, and the index gives the same article for every title as before. The test climate wiki shrinks from 8.8 to 6.5 MB. Only zimprep changed (init.app only by its version number). Source tarballs 1.0.35 to 1.0.40 held a stray Python wheel (zstandard...whl) by mistake; removed.
+* 1.0.44: Picture captions: the caption under a picture (figure, thumbnail, gallery and infobox captions) is shown in small text, centred under the picture, and goes with it when Pictures is off. 1.0.43 hid them (its notes said otherwise). Device only: wikis made with 1.0.43's zimprep get them as they are.
+* 1.0.43: Pictures. `zimprep --pictures lead|all` turns a maxi ZIM's article pictures (JPEG, PNG, WebP, GIF) into dithered black and white bitmaps in `NAME.P00`...; the WikiReader shows them in the article where they were (infobox and figure pictures, centred, with the caption below), reading each from the card as it scrolls into view (about 110 to 140 ms more to open an article with pictures, emulated). A Pictures switch on the empty search screen turns them off and on, keeping your place (also in Back and History). Picture files made from another ZIM are ignored. Tests: a test ZIM with the awkward cases (data-src, noscript copies, ../ paths, encoded names, maths and icons to ignore, a shared picture, a redirect), on the PC and emulated builds. zimprep needs libwebp-dev for this (it builds without it, and then refuses --pictures).
 * 1.0.42: zimprep stopped after reclustering a 2026 English Wikipedia maxi ZIM ("title list has 30142538 of 21673153 entries"): that ZIM has no usable title list in its header. zimprep now checks the list at the start (so a problem shows in minutes, not after hours) and, when it is missing or incomplete, rebuilds it by sorting the entries by namespace and title; on the test ZIMs the rebuilt list is byte for byte the original. Before 1.0.41 such a list was copied as it was, unchecked (only plain, unprepared ZIMs use it on the WikiReader).
 * 1.0.13: saves write only the data (a few KB) over the existing file instead of rewriting all 64 KB: quicker and much less writing to the card.
 * 1.0.12: the device never grows or recreates a save file (a cut-off save left an empty file that froze the next save); a failed save is not retried in a loop (that kept the unit awake); device logging no longer uses the unreliable printf.
@@ -458,7 +475,7 @@ now and then, or grifo's watchdog resets the unit after 20 s.
 
 * Timings are emulator estimates (roughly 2 to 3 cycles per instruction and
   about 1 MB/s from the card) and real use on one unit.
-* No images, no full text search (title search only). Section links work
+* Pictures only with `--pictures` (1-bit, dithered, no zooming); no full text search (title search only). Section links work
   when they name a heading; anchors elsewhere open the page at the top.
 * Tables are simplified to one line per row; complex formulas are linear
   text (a/b fractions, sub and superscripts side by side).
@@ -468,7 +485,8 @@ now and then, or grifo's watchdog resets the unit after 20 s.
   would cover them if the format were widened. Hebrew and Arabic are shown
   right to left but Arabic letters are not joined, and Indian scripts are
   not shaped.
-* At most 100 pieces per wiki (200 GB with 2 GB pieces) and 32 wikis.
+* At most 32 wikis per card, and 100 pieces per wiki (200 GB with 2 GB
+  pieces), counting the picture pieces (`NAME.P00`...) with the ZIM's.
 
 ## Layout
 
@@ -478,7 +496,7 @@ now and then, or grifo's watchdog resets the unit after 20 s.
     tools/        zimprep (+ recluster), zimcat, c33emu, getzims.sh, sim.sh,
                   mkrelease.sh, font and fold table generators
     card/         prebuilt kernel.elf, init.app, WIKIFONT.BIN; README.txt.in
-    third_party/  zstd decoder (BSD), xz-embedded (public domain)
+    third_party/  zstd decoder (BSD), xz-embedded (public domain), stb_image (zimprep only; MIT or public domain)
     fonts/        BDF sources and generated tables
     tests/        test suite
 
@@ -486,7 +504,7 @@ now and then, or grifo's watchdog resets the unit after 20 s.
 
 zimwiki: GPL v3 (like the WikiReader software it runs on). grifo and the
 WikiReader libraries: GPL v3, Openmoko. zstd: BSD. xz-embedded: public
-domain. Fonts: Liberation (GPL with font exception), Junicode (OFL),
+domain. stb_image: MIT or public domain. Fonts: Liberation (GPL with font exception), Junicode (OFL),
 WenQuanYi (GPL with font exception), DejaVu (free licence), GNU Unifont
 (GPL v2+ with font embedding exception, or SIL OFL 1.1). Wikipedia text:
 CC BY-SA, shown at the end of each article.

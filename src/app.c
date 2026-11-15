@@ -19,6 +19,9 @@
 #define ROW_H       19
 #define BAR_H       20
 #define OPT2_DY     12	/* Text size switch: this far below the other two */
+#define OPT_NOPICS  8	/* A.opts: the Pictures switch is off (ZWSTATE byte 14) */
+#define PIC_CACHE   8	/* pictures' bitmaps kept in memory */
+static void pcache_clear(void);
 #define KB_ROW_H    28	/* three rows like the original firmware's keyboard */
 #define KB_H        (3 * KB_ROW_H)
 #define KB_Y        (SCREEN_H - KB_H)
@@ -598,6 +601,7 @@ static int open_library(int i)
 		return r;
 	}
 	A.have_lib = 1;
+	pcache_clear();
 	/* first use of a card: map every chunk now, with a progress bar,
 	 * so later reads never stall on it */
 	for (c = 0; c < A.lib.nchunks; ++c) {
@@ -736,6 +740,49 @@ static void jump_to_section(const char *name);
 static int jump_to_anchor(const char *name);
 static int redirect_depth;
 
+/* pictures' bitmaps: read from the card when first drawn, a few kept */
+static struct {
+	uint64_t off;
+	uint32_t use;
+	uint8_t *bits;		/* NULL: free */
+} pcache[PIC_CACHE];
+static uint32_t pcache_clock;
+
+static void pcache_clear(void)
+{
+	int i;
+	for (i = 0; i < PIC_CACHE; ++i)
+		pcache[i].off = (uint64_t)-1;
+}
+
+static const uint8_t *app_pic_bits(const doc_t *d, int k)
+{
+	int i, victim = 0;
+	uint64_t off;
+	if (!A.have_lib || !A.lib.have_pics || k < 0 || (uint32_t)k >= d->pics.n)
+		return NULL;
+	off = d->pics.off[k];
+	for (i = 0; i < PIC_CACHE; ++i) {
+		if (pcache[i].bits && pcache[i].off == off) {
+			pcache[i].use = ++pcache_clock;
+			return pcache[i].bits;
+		}
+		if (!pcache[i].bits || pcache[i].use < pcache[victim].use)
+			victim = i;
+		if (!pcache[i].bits)
+			break;
+	}
+	if (!pcache[victim].bits &&
+	    !(pcache[victim].bits = zw_alloc(pic_bitmap_size(PIC_MAX_W, PIC_MAX_H))))
+		return NULL;
+	pcache[victim].off = (uint64_t)-1;
+	if (pic_bits(&A.lib.pics, &d->pics, k, pcache[victim].bits) < 0)
+		return NULL;
+	pcache[victim].off = off;
+	pcache[victim].use = ++pcache_clock;
+	return pcache[victim].bits;
+}
+
 /* open an article; push: remember the current screen for Back */
 static int open_entry(uint32_t entry, int32_t scroll, int push)
 {
@@ -762,6 +809,15 @@ static int open_entry(uint32_t entry, int32_t scroll, int push)
 	if (d.mime != A.lib.zim.html_mime) {
 		r = ZW_EUNSUPPORTED;
 		goto fail;
+	}
+	{
+		/* its pictures, if the wiki has any (shown or not is the
+		 * layout's business: the Pictures switch) */
+		static pic_set_t ps;
+		ps.n = 0;
+		if (A.lib.have_pics && pic_article(&A.lib.pics, final, &ps) < 0)
+			ps.n = 0;
+		html_set_pictures(&ps);
 	}
 	if ((r = zim_blob(&A.lib.zim, d.cluster, d.blob, &html, &len)) < 0)
 		goto fail;
@@ -1842,10 +1898,22 @@ static void draw_search(void)
 			text_at(3 * SCREEN_W / 4 - wb / 2, A.opt_y, FONT_SMALL, b, BLACK);
 			gfx_dotted(A.fb, SCREEN_STRIDE, SCREEN_H, SCREEN_W / 4 - wa / 2, A.opt_y + 2, wa);
 			gfx_dotted(A.fb, SCREEN_STRIDE, SCREEN_H, 3 * SCREEN_W / 4 - wb / 2, A.opt_y + 2, wb);
-			/* the third switch on a line of its own below */
-			text_at(SCREEN_W / 2 - wc / 2, A.opt_y + OPT2_DY, FONT_SMALL, c, BLACK);
-			gfx_dotted(A.fb, SCREEN_STRIDE, SCREEN_H, SCREEN_W / 2 - wc / 2,
-				   A.opt_y + OPT2_DY + 2, wc);
+			/* the third switch on a line of its own below, with the
+			 * Pictures switch beside it when the wiki has pictures */
+			if (A.have_lib && A.lib.have_pics) {
+				const char *d2 = A.opts & OPT_NOPICS ? "Pictures: off" : "Pictures: on";
+				int wd = font_width(FONT_SMALL, d2, strlen(d2));
+				text_at(SCREEN_W / 4 - wc / 2, A.opt_y + OPT2_DY, FONT_SMALL, c, BLACK);
+				gfx_dotted(A.fb, SCREEN_STRIDE, SCREEN_H, SCREEN_W / 4 - wc / 2,
+					   A.opt_y + OPT2_DY + 2, wc);
+				text_at(3 * SCREEN_W / 4 - wd / 2, A.opt_y + OPT2_DY, FONT_SMALL, d2, BLACK);
+				gfx_dotted(A.fb, SCREEN_STRIDE, SCREEN_H, 3 * SCREEN_W / 4 - wd / 2,
+					   A.opt_y + OPT2_DY + 2, wd);
+			} else {
+				text_at(SCREEN_W / 2 - wc / 2, A.opt_y + OPT2_DY, FONT_SMALL, c, BLACK);
+				gfx_dotted(A.fb, SCREEN_STRIDE, SCREEN_H, SCREEN_W / 2 - wc / 2,
+					   A.opt_y + OPT2_DY + 2, wc);
+			}
 		}
 		{
 			/* "zimwiki 1.0.0 · Oct 29 2026" at the foot of the free area */
@@ -2050,16 +2118,60 @@ static int32_t scale256(int32_t v, int32_t k)
 	return (v >> 8) * k + ((v & 255) * k >> 8);
 }
 
-static void relayout_article(int large)
+/* where scroll position y of layout from is in layout to: the same
+ * text at the top (to is laid out further as needed).  -1 if y is past
+ * what from has laid out */
+static int map_scroll(const layout_t *from, layout_t *to, int32_t y, int32_t *out)
 {
+	uint32_t i, off = 0;
+	int have = 0;
+	for (i = 0; i < from->nlines; ++i) {
+		const lay_line_t *ln = &from->lines[i];
+		if (ln->y + ln->h <= y || !ln->nfrag)
+			continue;
+		off = from->frags[ln->first].off;
+		have = 1;
+		break;
+	}
+	if (!have)
+		return -1;
+	for (;;) {
+		int32_t ny = 0;
+		int found = 0;
+		for (i = 0; i < to->nlines; ++i) {
+			const lay_line_t *ln = &to->lines[i];
+			if (!ln->nfrag)
+				continue;
+			if (to->frags[ln->first].off > off) {
+				found = 1;
+				break;
+			}
+			ny = ln->y;
+		}
+		if (found || to->done) {
+			*out = ny;
+			return 0;
+		}
+		if (lay_more(to, to->height + 20 * SCREEN_H, 0) < 0)
+			return -1;
+	}
+}
+
+static void relayout_article(int large, int pics)
+{
+	int32_t mback[BACK_MAX], mhist[HIST_MAX];
+	uint8_t okback[BACK_MAX], okhist[HIST_MAX];
 	layout_t nl;
 	uint32_t i, off = 0;
-	int32_t old_y = 0, new_y = 0;
+	int32_t old_y = 0, new_y = 0, k_default;
 	int have_off = 0;
 
 	lay_set_large(large);
-	if (!A.have_article || A.lay.large == (uint8_t)large)
+	lay_set_pictures(pics);
+	if (!A.have_article || (A.lay.large == (uint8_t)large && A.lay.pics == (uint8_t)pics))
 		return;
+	/* a typical ratio if the page is too short to measure */
+	k_default = A.lay.large != (uint8_t)large ? (large ? 384 : 171) : 256;
 	for (i = 0; i < A.lay.nlines; ++i) {
 		const lay_line_t *ln = &A.lay.lines[i];
 		if (ln->y + ln->h <= A.scroll || !ln->nfrag)
@@ -2098,6 +2210,18 @@ static void relayout_article(int large)
 	}
 	if (!nl.done)
 		lay_more(&nl, new_y + 3 * SCREEN_H, 0);
+	{
+		/* saved places in this same article: mapped exactly, through
+		 * the text (a picture moves what follows by its height, which
+		 * no ratio gets right) */
+		int j;
+		for (j = 0; j < A.nback && j < BACK_MAX; ++j)
+			okback[j] = A.back[j].kind == BI_ARTICLE && A.back[j].entry == A.entry &&
+				    map_scroll(&A.lay, &nl, A.back[j].scroll, &mback[j]) == 0;
+		for (j = 0; j < A.nhist && j < HIST_MAX; ++j)
+			okhist[j] = A.hist[j].entry == A.entry &&
+				    map_scroll(&A.lay, &nl, A.hist[j].scroll, &mhist[j]) == 0;
+	}
 	A.opening = 0;
 	lay_free(&A.lay);
 	A.lay = nl;
@@ -2105,17 +2229,19 @@ static void relayout_article(int large)
 	{
 		/* scale factor in 1/256ths (32-bit maths only: no 64-bit
 		 * division on the device) */
-		int32_t k = large ? 384 : 171;
+		int32_t k = k_default;
 		int j;
 		if (old_y > 2 * SCREEN_H && new_y > 0)
 			k = old_y < 0x400000 ? new_y * 256 / old_y : new_y / (old_y >> 8);
 		if (k < 64 || k > 1024)
-			k = large ? 384 : 171;
+			k = k_default;
 		for (j = 0; j < A.nback; ++j)
 			if (A.back[j].kind == BI_ARTICLE)
-				A.back[j].scroll = scale256(A.back[j].scroll, k);
+				A.back[j].scroll = j < BACK_MAX && okback[j] ? mback[j] :
+						   scale256(A.back[j].scroll, k);
 		for (j = 0; j < A.nhist; ++j)
-			A.hist[j].scroll = scale256(A.hist[j].scroll, k);
+			A.hist[j].scroll = j < HIST_MAX && okhist[j] ? mhist[j] :
+					   scale256(A.hist[j].scroll, k);
 		A.hist_dirty = 1;
 	}
 	A.scroll = have_off ? new_y : 0;
@@ -2600,10 +2726,13 @@ static void touch_up(int x, int y)
 			return;
 		}
 		if (!A.qlen && A.opt_y && y > A.opt_y + 5 && y <= A.opt_y + OPT2_DY + 7) {
-			/* Text size: the open page too, at once */
-			A.opts ^= HTML_LARGE;
+			/* Text size or Pictures: the open page too, at once */
+			if (A.have_lib && A.lib.have_pics && x >= SCREEN_W / 2)
+				A.opts ^= OPT_NOPICS;
+			else
+				A.opts ^= HTML_LARGE;
 			html_set_options(A.opts);
-			relayout_article((A.opts & HTML_LARGE) != 0);
+			relayout_article((A.opts & HTML_LARGE) != 0, !(A.opts & OPT_NOPICS));
 			A.state_dirty = 1;
 			A.need_draw = 1;
 			return;
@@ -2955,9 +3084,10 @@ static void restore_state(void)
 			A.calc_rad = buf[213] == 1;
 		}
 		if (len >= 25 && zw_rd32(buf) == STATE_MAGIC && (buf[14] & 0x80)) {
-			A.opts = buf[14] & (HTML_NOTES | HTML_CITES | HTML_LARGE);
+			A.opts = buf[14] & (HTML_NOTES | HTML_CITES | HTML_LARGE | OPT_NOPICS);
 			html_set_options(A.opts);
 			lay_set_large((A.opts & HTML_LARGE) != 0);
+			lay_set_pictures(!(A.opts & OPT_NOPICS));
 		}
 		if (len >= 25 && zw_rd32(buf) == STATE_MAGIC) {
 			memcpy(name, buf + 4, 8);
@@ -3028,6 +3158,8 @@ void app_init(void)
 
 	memset(&A, 0, sizeof(A));
 	A.pressed_row = A.pressed_key = -1;
+	pcache_clear();
+	lay_set_pic_source(app_pic_bits);
 	A.seed = plat_ms() ^ 0x9e3779b9u;
 	A.kb_visible = 1;
 
@@ -3110,8 +3242,14 @@ void app_describe(char *out, int cap)
 	tmp[0] = 0;
 	switch (A.screen) {
 	case S_ARTICLE:
-		n = snprintf(tmp, sizeof(tmp), "article \"%s\" scroll=%d/%d back=%d", A.title,
-			     (int)A.scroll, (int)max_scroll(), A.nback);
+		{
+			uint32_t b, np = 0;
+			for (b = 0; b < A.doc.nblocks; ++b)
+				np += A.doc.blocks[b].kind == BK_PIC;
+			n = snprintf(tmp, sizeof(tmp), "article \"%s\" scroll=%d/%d back=%d pics=%u%s",
+				     A.title, (int)A.scroll, (int)max_scroll(), A.nback, (unsigned)np,
+				     np && !A.lay.pics ? " hidden" : "");
+		}
 		break;
 	case S_SEARCH:
 		n = snprintf(tmp, sizeof(tmp), "search \"%s\" rows=%d first=\"%s\"", A.query, A.nrows,

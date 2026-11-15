@@ -308,5 +308,148 @@ fi
 
 $B/calctest > "$T/calc.txt" 2>&1 && ok "calculator core" || { bad "calculator core"; cat "$T/calc.txt"; }
 
+# pictures (zimprep --pictures): a maxi style test ZIM made from the
+# climate change ZIM's pictures (needs libzim and Pillow for Python, and a
+# zimprep built with libwebp)
+CLIMATE=
+[ -n "$ZIM_TESTS" ] && CLIMATE="$ZIM_TESTS/nons/wikipedia_en_climate_change_mini_2024-06.zim"
+if [ -f "$CLIMATE" ] && python3 -c "import libzim, PIL" 2>/dev/null &&
+   $B/zimprep --pictures all 2>&1 | grep -q "usage"; then
+	P=$T/pic
+	rm -rf "$P"
+	mkdir -p "$P"
+	python3 tests/mkpiczim.py "$CLIMATE" "$P/pictest.zim" > /dev/null 2>&1
+	# the pictures each article should get
+	cat > "$P/want.py" <<'PY'
+import struct, sys, glob
+from libzim.reader import Archive
+base, zim, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+want = {'Cattle': 2, 'Gujarat_work': 1, 'Bamboo': 1, 'Lamb': 2, 'Shared': 1,
+        'Wind/Power': 1, 'Long_page': 1}
+if mode == 'lead':
+    want = {k: 1 for k in want}
+d = b''.join(open(p, 'rb').read() for p in sorted(glob.glob(base + '.P[0-9][0-9]')))
+a = Archive(zim)
+n = struct.unpack('<I', d[8:12])[0]
+got = {}
+offs = {}
+for i in range(n):
+    e, off = struct.unpack('<IQ', d[64 + 12 * i:76 + 12 * i])
+    cnt = d[off]
+    got[a._get_entry_by_id(e).path] = cnt
+    offs[a._get_entry_by_id(e).path] = [struct.unpack('<Q', d[off + 12 + 16 * k:off + 20 + 16 * k])[0]
+                                        for k in range(cnt)]
+ok = got == want
+if mode == 'all':
+    ok = ok and offs['Shared'][0] == offs['Cattle'][0]   # one bitmap, shared
+if not ok:
+    print(got)
+sys.exit(0 if ok else 1)
+PY
+	for m in all lead; do
+		rm -rf "$P/$m"
+		$B/zimprep --recluster 64 --level 3 --pictures $m "$P/pictest.zim" "$P/$m" > "$P/$m.log" 2>&1
+		cat "$P/$m"/WIKI.Z* > "$P/$m.zim"
+		python3 tests/picdump.py "$P/$m/WIKI" --check "$P/$m.zim" > /dev/null &&
+		python3 "$P/want.py" "$P/$m/WIKI" "$P/$m.zim" $m \
+			&& ok "pictures made: $m" || { bad "pictures made: $m"; cat "$P/$m.log"; }
+	done
+	rm -rf "$P/none"
+	$B/zimprep --recluster 64 --level 3 "$P/pictest.zim" "$P/none" > /dev/null 2>&1
+	[ ! -e "$P/none/WIKI.P00" ] && ok "no pictures unless asked" || bad "no pictures unless asked"
+	# old style ZIM (A/ and I/ namespaces): the home page's pictures
+	if [ -f "$ZIM_TESTS/withns/wikipedia_en_climate_change_mini_2024-06.zim" ]; then
+		rm -rf "$P/old"
+		$B/zimprep --recluster 64 --level 3 --pictures all \
+			"$ZIM_TESTS/withns/wikipedia_en_climate_change_mini_2024-06.zim" "$P/old" > /dev/null 2>&1
+		cat "$P/old"/WIKI.Z* > "$P/old.zim"
+		python3 tests/picdump.py "$P/old/WIKI" --check "$P/old.zim" | grep -q "^1 articles, 32 picture" \
+			&& ok "pictures made: old style ZIM" || bad "pictures made: old style ZIM"
+	fi
+	# on the WikiReader: each article's pictures, the switch (keeping the
+	# place), a redirect
+	cat > "$P/app.txt" <<'EOF2'
+type cattle
+tap 60 30
+expect pics=2
+drag 120 200 120 20 300
+drag 120 200 120 20 300
+wait 1500
+button search
+button search
+expect search ""
+tap 180 104
+button history
+expect pics=2 hidden
+button search
+button search
+tap 180 104
+button history
+expect pics=2
+button search
+button search
+type gujarat
+tap 60 30
+expect pics=1
+button search
+button search
+type bamboo
+tap 60 30
+expect pics=1
+button search
+button search
+type lamb
+tap 60 30
+expect pics=2
+button search
+button search
+type wind power
+tap 60 30
+expect pics=1
+button search
+button search
+type long page
+tap 60 30
+expect pics=1
+drag 120 200 120 0 30
+wait 3000
+button search
+button search
+type plain
+tap 60 30
+expect pics=0
+button search
+button search
+type cow
+tap 60 30
+expect "Cattle"
+expect pics=2
+EOF2
+	mkdir -p "$P/card/WIKI"
+	cp "$P/all"/WIKI.* "$P/card/WIKI/"
+	sh tests/mkcard.sh "$P/card.img" 32 > /dev/null 2>&1
+	MTOOLS_SKIP_CHECK=1 mcopy -s -i "$P/card.img@@1M" "$P/card/WIKI" ::WIKI
+	rm -rf "$P/state"
+	$B/zimwiki-headless "$P/card.img" "$P/app.txt" "$P/state" > "$P/app.log" 2>&1 \
+		&& ok "pictures in articles (PC build)" || { bad "pictures in articles (PC build)"; grep FAIL "$P/app.log"; }
+	if [ -x build/c33emu ] && [ -f device/build/init.elf ]; then
+		rm -rf "$P/state"
+		build/c33emu device/build/init.elf "$P/card.img" "$P/app.txt" "$P/state" > "$P/emu.log" 2>&1 \
+			&& ok "pictures in articles (emulated)" || { bad "pictures in articles (emulated)"; grep FAIL "$P/emu.log"; }
+	fi
+	# pictures made from another ZIM are not used
+	mkdir -p "$P/card2/WIKI"
+	cp "$P/none"/WIKI.* "$P/card2/WIKI/"
+	cp "$P/old/WIKI.P00" "$P/card2/WIKI/"
+	sh tests/mkcard.sh "$P/card2.img" 32 > /dev/null 2>&1
+	MTOOLS_SKIP_CHECK=1 mcopy -s -i "$P/card2.img@@1M" "$P/card2/WIKI" ::WIKI
+	printf 'type cattle\ntap 60 30\nexpect pics=0\n' > "$P/app2.txt"
+	rm -rf "$P/state"
+	$B/zimwiki-headless "$P/card2.img" "$P/app2.txt" "$P/state" > "$P/app2.log" 2>&1 \
+		&& ok "pictures of another ZIM ignored" || { bad "pictures of another ZIM ignored"; cat "$P/app2.log"; }
+else
+	echo "skip  pictures (needs ZIM_TESTS, libzim and Pillow for Python, libwebp)"
+fi
+
 echo "$pass passed, $fail failed"
 [ $fail = 0 ]

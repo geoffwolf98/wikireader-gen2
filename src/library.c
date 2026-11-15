@@ -192,6 +192,40 @@ static int zim_read_cb(void *ctx, uint64_t off, void *buf, uint32_t len)
 	return ZW_OK;
 }
 
+/* the same for the picture file's pieces */
+static int pic_read_cb(void *ctx, uint64_t off, void *buf, uint32_t len)
+{
+	library_t *L = ctx;
+	uint8_t *p = buf;
+	while (len) {
+		uint32_t c = (uint32_t)(off >> L->pshift);
+		uint64_t base = (uint64_t)c << L->pshift;
+		uint32_t in = (uint32_t)(off - base), n;
+		fat_file_t *f;
+		int r;
+		if (c >= L->npchunks)
+			return ZW_ERANGE;
+		f = &L->chunk[L->nchunks + c];
+		if (!L->chunk_ready[L->nchunks + c]) {
+			if ((r = fat_build_extents(L->vol, f, NULL, NULL)) < 0)
+				return r;
+			L->chunk_ready[L->nchunks + c] = 1;
+			L->ext_dirty = 1;
+		}
+		n = f->size - in;
+		if (n > len)
+			n = len;
+		if (!n)
+			return ZW_EIO;
+		if ((r = fat_read(L->vol, f, in, p, n)) < 0)
+			return r;
+		p += n;
+		off += n;
+		len -= n;
+	}
+	return ZW_OK;
+}
+
 static int idx_read_cb(void *ctx, uint64_t off, void *buf, uint32_t len)
 {
 	library_t *L = ctx;
@@ -213,7 +247,8 @@ static void load_extents(library_t *L)
 	ext_name(L, name);
 	if (plat_load(name, &data, &len) < 0)
 		return;
-	if (len < 8 || zw_rd32(data) != EXT_MAGIC || (n = zw_rd32(data + 4)) != L->nchunks)
+	if (len < 8 || zw_rd32(data) != EXT_MAGIC ||
+	    (n = zw_rd32(data + 4)) != L->nchunks + L->npchunks)
 		goto done;
 	for (i = 0; i < n; ++i) {
 		uint32_t size, first, stamp, bytes;
@@ -241,15 +276,16 @@ void lib_save_extents(library_t *L)
 	uint32_t i, len = 8, off = 8;
 	uint8_t *data;
 	char name[32];
+	uint32_t all = L->nchunks + L->npchunks;
 	if (!L->ext_dirty)
 		return;
-	for (i = 0; i < L->nchunks; ++i)
+	for (i = 0; i < all; ++i)
 		len += 16 + (L->chunk_ready[i] ? fat_extents_size(&L->chunk[i]) : 0);
 	if (!(data = zw_alloc(len)))
 		return;
 	zw_wr32(data, EXT_MAGIC);
-	zw_wr32(data + 4, L->nchunks);
-	for (i = 0; i < L->nchunks; ++i) {
+	zw_wr32(data + 4, all);
+	for (i = 0; i < all; ++i) {
 		uint32_t b = L->chunk_ready[i] ? fat_extents_size(&L->chunk[i]) : 0;
 		zw_wr32(data + off, L->chunk[i].size);
 		zw_wr32(data + off + 4, L->chunk[i].first_cluster);
@@ -317,6 +353,27 @@ int lib_open(library_t *L, fat_vol_t *v, const lib_info_t *info)
 		L->shift = 32;
 		total = L->chunk[0].size;
 	}
+	if (info->prepared) {
+		/* pictures: NAME.P00, P01 ... (all but the last 2^shift bytes) */
+		for (i = 0; i < 100 && L->nchunks + i < LIB_MAX_CHUNK; ++i) {
+			char ext[5] = ".P00";
+			ext[2] = (char)('0' + i / 10);
+			ext[3] = (char)('0' + i % 10);
+			lib_path(info, ext, name);
+			if (fat_lookup(v, name, &L->chunk[L->nchunks + i]) < 0)
+				break;
+		}
+		L->npchunks = i;
+		L->pshift = 32;
+		if (L->npchunks > 1) {
+			uint32_t sz = L->chunk[L->nchunks].size;
+			L->pshift = 0;
+			while (L->pshift < 31 && (1u << L->pshift) < sz)
+				L->pshift++;
+			if (sz != (1u << L->pshift))
+				L->npchunks = 0;	/* not pieces of one file */
+		}
+	}
 	load_extents(L);
 	L->zim_io.read = zim_read_cb;
 	L->zim_io.ctx = L;
@@ -325,6 +382,18 @@ int lib_open(library_t *L, fat_vol_t *v, const lib_info_t *info)
 		return r;
 	if (info->prepared && memcmp(L->zim.uuid, L->idx.uuid, 16) != 0)
 		return ZW_EFORMAT;	/* index made from a different ZIM */
+	if (L->npchunks) {
+		uint64_t ptotal = 0;
+		for (i = 0; i < L->npchunks; ++i)
+			ptotal += L->chunk[L->nchunks + i].size;
+		L->pic_io.read = pic_read_cb;
+		L->pic_io.ctx = L;
+		L->pic_io.size = ptotal;
+		/* pictures that do not belong to this ZIM are just not used */
+		L->have_pics = pic_open(&L->pics, &L->pic_io, L->zim.uuid) == ZW_OK;
+		if (!L->have_pics)
+			zw_log("pictures not used (made from another ZIM?)");
+	}
 	if (!info->prepared) {
 		char t[128];
 		if (zim_metadata(&L->zim, "Title", t, sizeof(t)) == 0 && t[0])
@@ -343,7 +412,7 @@ void lib_close(library_t *L)
 	if (L->info.prepared)
 		idx_close(&L->idx);
 	fat_close(&L->idx_file);
-	for (i = 0; i < L->nchunks; ++i)
+	for (i = 0; i < L->nchunks + L->npchunks; ++i)
 		fat_close(&L->chunk[i]);
 	memset(L, 0, sizeof(*L));
 }

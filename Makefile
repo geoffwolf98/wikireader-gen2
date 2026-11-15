@@ -11,7 +11,13 @@ SDL_LIBS   := $(shell pkg-config --libs sdl2 2>/dev/null)
 
 THIRD := third_party/zstd/zstddeclib.c third_party/xz/xz_crc32.c \
          third_party/xz/xz_dec_stream.c third_party/xz/xz_dec_lzma2.c
-CORE  := src/zim.c src/fold.c src/index.c
+CORE  := src/zim.c src/fold.c src/index.c src/pic.c
+
+# pictures (zimprep --pictures) need libwebp; without it zimprep says so
+WEBP_LIBS := $(shell pkg-config --libs libwebp 2>/dev/null)
+ifneq ($(WEBP_LIBS),)
+$(BUILD)/tools/pictures.o: CFLAGS += -DZW_HAVE_WEBP $(shell pkg-config --cflags libwebp)
+endif
 APP   := src/app.c src/library.c src/blockdev.c src/fat.c src/html.c \
          src/layout.c src/font.c src/gfx.c src/tex.c src/calc.c fonts/fonts.c
 
@@ -70,8 +76,8 @@ wikifont: tools/mkwikifont.py tools/bdf2c.py fonts/bdf/textall.bdf
 src/fold_table.h: tools/mkfold.py
 	python3 tools/mkfold.py > $@
 
-$(BUILD)/zimprep: $(call obj,tools/zimprep.c tools/recluster.c $(CORE) $(THIRD) host/hostio.c)
-	$(CC) -o $@ $^ -lzstd -lpthread
+$(BUILD)/zimprep: $(call obj,tools/zimprep.c tools/recluster.c tools/pictures.c $(CORE) $(THIRD) host/hostio.c)
+	$(CC) -o $@ $^ -lzstd -lpthread $(WEBP_LIBS) -lm
 
 $(BUILD)/zimcat: $(call obj,tools/zimcat.c $(CORE) $(THIRD) host/hostio.c)
 	$(CC) -o $@ $^

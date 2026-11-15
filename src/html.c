@@ -79,6 +79,13 @@ static int tag_void(int t)
 static int html_opts;	/* HTML_NOTES, HTML_CITES (tested as a whole) */
 static int html_large;	/* HTML_LARGE: maths columns measured large */
 
+static const pic_set_t *html_pics;	/* NULL or n = 0: no pictures */
+
+void html_set_pictures(const pic_set_t *s)
+{
+	html_pics = s && s->n ? s : NULL;
+}
+
 void html_set_options(int o)
 {
 	html_opts = o & (HTML_NOTES | HTML_CITES);
@@ -111,6 +118,10 @@ static const char *const skip_sections[] = {
 typedef struct elem {
 	uint8_t tag;
 	uint8_t skip;
+	uint8_t pic_ok;		/* hidden, but its pictures are still shown */
+	uint8_t cap_box;	/* holds a picture and its caption (figure, thumb...) */
+	uint8_t had_pic;	/* a picture was placed inside it */
+	uint8_t cap;		/* a shown picture caption */
 	uint8_t kind, indent;	/* block context to restore on close */
 	uint16_t number;
 	uint16_t link;
@@ -139,6 +150,7 @@ typedef struct parser {
 	int cells;		/* cells emitted in the current row */
 	int prev_th;
 	uint32_t cell_start;	/* text_len when the current cell began */
+	uint32_t pics_used;	/* pictures already placed (bit per index) */
 	/* sections */
 	int heading_level;	/* collecting a heading of this level, else 0 */
 	uint32_t heading_block;
@@ -253,7 +265,7 @@ static int cur_font(parser_t *p)
 		return FONT_HEADING;
 	case BK_H4: case BK_DT: case BK_CAPTION:
 		return p->italic ? FONT_BOLDITALIC : FONT_BOLD;
-	case BK_SMALL:
+	case BK_SMALL: case BK_PICCAP:
 		return FONT_SMALL;
 	}
 	if (p->small_footer || (p->small && !p->bold))
@@ -307,7 +319,7 @@ static void end_block(parser_t *p)
 			b->nruns--;
 			d->nruns--;
 		}
-		if (!b->nruns && b->kind != BK_RULE)
+		if (!b->nruns && b->kind != BK_RULE && b->kind != BK_PIC)
 			d->nblocks--;	/* nothing was written */
 	}
 	p->block_open = 0;
@@ -591,6 +603,8 @@ typedef struct attrs {
 	const char *content; uint32_t content_len;	/* <meta content=...> */
 	const char *typ; uint32_t typ_len;	/* typeof="mw:File" */
 	const char *grp; uint32_t grp_len;	/* data-mw-group: a notes list */
+	const char *src; uint32_t src_len;	/* <img src> */
+	const char *dsrc; uint32_t dsrc_len;	/* <img data-src> (lazy loading) */
 } attrs_t;
 
 static void parse_attrs(const char *s, const char *end, attrs_t *a)
@@ -646,6 +660,8 @@ static void parse_attrs(const char *s, const char *end, attrs_t *a)
 		else ATTR("content", content)
 		else ATTR("typeof", typ)
 		else ATTR("data-mw-group", grp)
+		else ATTR("src", src)
+		else ATTR("data-src", dsrc)
 #undef ATTR
 	}
 }
@@ -678,6 +694,45 @@ static int contains(const char *s, uint32_t n, const char *needle)
 			return 1;
 	return 0;
 }
+
+/* picture containers: hidden for their text (captions shown elsewhere
+ * or clutter), but with pictures on, their pictures still come through
+ * (skip_by_attrs returns 2) */
+static int is_pic_box(const char *w, uint32_t n)
+{
+	static const char *const box[] = { "thumb", "thumbinner", "gallery", "tmulti",
+					   "infobox-image", NULL };
+	int i;
+	for (i = 0; box[i]; ++i)
+		if (strlen(box[i]) == n && !memcmp(w, box[i], n))
+			return 1;
+	return 0;
+}
+
+static int class_is(const attrs_t *a, const char *const *names)
+{
+	const char *c = a->cls, *end = a->cls + a->cls_len;
+	int i;
+	if (!c)
+		return 0;
+	while (c < end) {
+		const char *w;
+		while (c < end && *c == ' ')
+			c++;
+		w = c;
+		while (c < end && *c != ' ')
+			c++;
+		for (i = 0; names[i]; ++i)
+			if (strlen(names[i]) == (size_t)(c - w) && !memcmp(w, names[i], c - w))
+				return 1;
+	}
+	return 0;
+}
+
+/* a picture with its caption: <figure>, or these classes */
+static const char *const cap_boxes[] = { "thumbinner", "thumb", "gallerybox", "tsingle",
+					 "infobox-image", NULL };
+static const char *const cap_classes[] = { "thumbcaption", "infobox-caption", "gallerytext", NULL };
 
 static int skip_by_attrs(const attrs_t *a)
 {
@@ -727,7 +782,7 @@ static int skip_by_attrs(const attrs_t *a)
 			for (i = 0; skip_classes[i] && i < 64; ++i)
 				if (slen[i] == n && w[0] == skip_classes[i][0] &&
 				    memcmp(w, skip_classes[i], n) == 0)
-					return 1;
+					return html_pics && is_pic_box(w, n) ? 2 : 1;
 		}
 	}
 	return 0;
@@ -1272,7 +1327,51 @@ static void open_tag(parser_t *p, int t, const attrs_t *a, int self_closing)
 {
 	elem_t *e;
 	int parent_skip = p->depth ? p->st[p->depth - 1].skip : 0;
-	int skip = parent_skip || tag_hidden(t) || skip_by_attrs(a);
+	int parent_pic_ok = p->depth ? p->st[p->depth - 1].pic_ok : 0;
+	/* with pictures, a <figure> is shown for its picture (its caption,
+	 * <figcaption>, stays hidden) */
+	int hidden = tag_hidden(t) && !(t == T_FIGURE && html_pics);
+	int sb = skip_by_attrs(a);
+	int skip = parent_skip || hidden || sb;
+	/* hidden only as a picture container (or inside one): pictures pass */
+	int pic_ok = html_pics && skip && (!parent_skip || parent_pic_ok) && sb != 1 &&
+		     (!hidden || t == T_IMG);
+
+	/* a picture's caption: shown (as BK_PICCAP) when its picture was */
+	int cap = 0;
+	if (html_pics && !p->skip_level && sb != 1 && (!parent_skip || parent_pic_ok) &&
+	    (t == T_FIGCAPTION || class_is(a, cap_classes))) {
+		int k;
+		for (k = p->depth - 1; k >= 0 && !p->st[k].cap_box; --k)
+			;
+		if (k >= 0 && p->st[k].had_pic) {
+			cap = 1;
+			skip = 0;
+			pic_ok = 0;
+		}
+	}
+
+	if (t == T_IMG && html_pics && (!parent_skip || parent_pic_ok) && !p->skip_level && sb != 1) {
+		const char *src = a->src && a->src_len && memcmp(a->src, "data:", 5) ? a->src : a->dsrc;
+		uint32_t slen = src == a->src ? a->src_len : a->dsrc_len;
+		int k = src && slen ? pic_find(html_pics, pic_src_hash(src, slen)) : -1;
+		if (k >= 0 && !(p->pics_used & (1u << k))) {
+			/* a block of its own, then on as before (a table row
+			 * carries on in a new block) */
+			uint8_t kind = p->kind;
+			uint16_t num = p->number;
+			int j;
+			p->pics_used |= 1u << k;
+			for (j = 0; j < p->depth; ++j)
+				p->st[j].had_pic = 1;
+			set_block(p, BK_PIC);
+			p->number = (uint16_t)k;
+			open_block(p);
+			end_block(p);
+			p->kind = kind == BK_PIC ? BK_PARA : kind;
+			p->number = num;
+		}
+	}
 
 	if (t == T_META && a->content && p->d->refresh_link == 0xffff)
 		meta_refresh(p, a->content, a->content_len);
@@ -1362,6 +1461,10 @@ static void open_tag(parser_t *p, int t, const attrs_t *a, int self_closing)
 	e = &p->st[p->depth++];
 	e->tag = (uint8_t)t;
 	e->skip = (uint8_t)skip;
+	e->pic_ok = (uint8_t)pic_ok;
+	e->cap_box = (uint8_t)(html_pics && (t == T_FIGURE || class_is(a, cap_boxes)));
+	e->had_pic = 0;
+	e->cap = (uint8_t)cap;
 	e->kind = p->kind;
 	e->indent = p->indent;
 	e->number = p->number;
@@ -1510,6 +1613,11 @@ static void open_tag(parser_t *p, int t, const attrs_t *a, int self_closing)
 			p->bold++;
 		break;
 	}
+	if (cap) {
+		p->cell_mode = 0;
+		p->indent = 0;
+		set_block(p, BK_PICCAP);
+	}
 }
 
 static int section_is_skipped(parser_t *p)
@@ -1588,6 +1696,8 @@ static void close_tag(parser_t *p, int t)
 	e = &p->st[--p->depth];
 	if (e->mark && !e->skip)
 		end_marker(p);
+	if (e->cap)
+		end_block(p);
 	if (!e->skip) {
 		switch (t) {
 		case T_H1: case T_H2: case T_H3: case T_H4: case T_H5: case T_H6:
@@ -1711,6 +1821,10 @@ int html_to_doc(doc_t *d, const char *html, uint32_t len,
 	p->base_url = base_url;
 	p->new_ns = new_ns;
 	p->last_math_end = 0xffffffffu;
+	if (html_pics)
+		d->pics = *html_pics;	/* the doc keeps its pictures' table */
+	else
+		d->pics.n = 0;
 
 	const char *kick = s;
 	while (s < end && !p->err) {

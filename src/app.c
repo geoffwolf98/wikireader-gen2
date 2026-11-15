@@ -94,6 +94,7 @@ static struct app {
 	char title[256];
 	int32_t scroll;
 	int32_t vel;		/* momentum, 1/16 px per 20 ms step */
+	uint32_t stall_ms;	/* when the last long piece of work ended */
 	uint32_t anim_ms;
 	int toolbar;
 	int show_bar;		/* scroll position indicator */
@@ -776,6 +777,10 @@ static const uint8_t *app_pic_bits(const doc_t *d, int k)
 	    !(pcache[victim].bits = zw_alloc(pic_bitmap_size(PIC_MAX_W, PIC_MAX_H))))
 		return NULL;
 	pcache[victim].off = (uint64_t)-1;
+	/* reading from the card would hold up a moving page (and the
+	 * finger's samples with it): read it once the page stops */
+	if (A.touching || A.vel)
+		return LAY_PIC_PENDING;
 	if (pic_bits(&A.lib.pics, &d->pics, k, pcache[victim].bits) < 0)
 		return NULL;
 	pcache[victim].off = off;
@@ -2765,7 +2770,10 @@ static void touch_up(int x, int y)
 			/* fling: velocity from the last two samples */
 			int32_t dt = (int32_t)(A.t_last - A.t_prev);
 			A.show_bar = 1;
-			if (dt > 0 && dt < 120 && plat_ms() - A.t_last < 80) {
+			/* no fling when the last samples straddle a stall (the
+			 * finger's movement during it arrives as one jump) */
+			if (dt > 0 && dt < 120 && plat_ms() - A.t_last < 80 &&
+			    (int32_t)(A.t_prev - A.stall_ms) > 0) {
 				A.vel = (int32_t)(A.ty_prev - A.ty) * 16 * 20 / dt;
 				if (A.vel > 16 * 60)
 					A.vel = 16 * 60;
@@ -3018,11 +3026,16 @@ static int idle_work(void)
 		draw();
 		return 1;
 	}
-	if (A.screen == S_ARTICLE && A.have_article && !A.touching) {
-		uint8_t before = 0;
-		(void)before;
-		lay_prefetch(&A.lay, A.scroll, SCREEN_H);
+	if (A.screen == S_ARTICLE && A.have_article && !A.touching && !A.vel) {
+		int f = lay_fill_pending(&A.lay, A.scroll, SCREEN_H);
+		if (f) {
+			if (f == 2)
+				A.need_draw = 1;
+			return 1;
+		}
 	}
+	if (A.screen == S_ARTICLE && A.have_article && !A.touching)
+		lay_prefetch(&A.lay, A.scroll, SCREEN_H);
 	if (A.have_article && !A.lay.done && !A.touching && !A.vel) {
 		/* the rest of a long page, a slice at a time so a touch is
 		 * never kept waiting for long */
@@ -3040,12 +3053,23 @@ static int idle_work(void)
 	return 0;
 }
 
+/* work that held up input for long enough to spoil the finger's
+ * timing (a picture read, a slice of a long page) */
+static void note_stall(uint32_t t0)
+{
+	uint32_t now = plat_ms();
+	if (now - t0 > 50)
+		A.stall_ms = now;
+}
+
 int app_awake(void)
 {
 	/* the same tests as app_main before it calls plat_wait */
 	if (animating() || A.need_draw || A.search_dirty)
 		return 1;
 	if (A.have_article && !A.lay.done && !A.touching && !A.vel)
+		return 1;
+	if (A.screen == S_ARTICLE && A.have_article && !A.touching && !A.vel && lay_pending(&A.lay))
 		return 1;
 	if ((A.state_dirty || A.hist_dirty || (A.have_lib && A.lib.ext_dirty)) &&
 	    A.have_lib && !A.touching)
@@ -3060,7 +3084,10 @@ void app_settle(void)
 		tick();
 		if (A.vel && A.screen == S_ARTICLE)
 			continue;	/* tests run momentum to completion */
-		if (!idle_work())
+		uint32_t t0 = plat_ms();
+		int w = idle_work();
+		note_stall(t0);
+		if (!w)
 			break;
 	}
 }
@@ -3199,7 +3226,10 @@ int app_main(void)
 		tick();
 		got = plat_poll(&e);
 		if (!got) {
-			if (idle_work())
+			uint32_t t0 = plat_ms();
+			int w = idle_work();
+			note_stall(t0);
+			if (w)
 				continue;
 			if (animating())
 				continue;	/* keep polling while something moves */
@@ -3224,9 +3254,13 @@ int app_main(void)
 				e = n;
 			}
 		}
-		app_event(&e);
-		if (A.need_draw && !A.search_dirty)
-			draw();
+		{
+			uint32_t t0 = plat_ms();
+			app_event(&e);
+			if (A.need_draw && !A.search_dirty)
+				draw();
+			note_stall(t0);
+		}
 	}
 	if (A.have_lib)
 		lib_close(&A.lib);
@@ -3246,9 +3280,10 @@ void app_describe(char *out, int cap)
 			uint32_t b, np = 0;
 			for (b = 0; b < A.doc.nblocks; ++b)
 				np += A.doc.blocks[b].kind == BK_PIC;
-			n = snprintf(tmp, sizeof(tmp), "article \"%s\" scroll=%d/%d back=%d pics=%u%s",
+			n = snprintf(tmp, sizeof(tmp), "article \"%s\" scroll=%d/%d back=%d pics=%u%s%s",
 				     A.title, (int)A.scroll, (int)max_scroll(), A.nback, (unsigned)np,
-				     np && !A.lay.pics ? " hidden" : "");
+				     np && !A.lay.pics ? " hidden" : "",
+				     lay_pending(&A.lay) ? " picwait" : "");
 		}
 		break;
 	case S_SEARCH:

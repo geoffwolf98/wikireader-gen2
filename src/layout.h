@@ -55,6 +55,8 @@ typedef struct layout {
 	uint8_t *strip_mem;
 	int32_t strip_id[STRIP_CACHE];
 	uint32_t strip_use[STRIP_CACHE];
+	uint8_t strip_pend[STRIP_CACHE];	/* has pictures still to read */
+	uint8_t rendering_pend;
 	uint32_t clock;
 	int32_t prefetched_top;	/* prefetch finished for this position */
 	/* incremental build: long pages are laid out a slice at a time */
@@ -89,6 +91,16 @@ int lay_blit(layout_t *l, int32_t top, uint8_t *buf, int y0, int rows);
 /* make sure the strips around [top, top+rows) are rendered; cheap
  * to call from idle time */
 void lay_prefetch(layout_t *l, int32_t top, int rows);
+
+/* what a picture source returns for a picture it will read later (drawn
+ * as a frame until then) */
+#define LAY_PIC_PENDING ((const uint8_t *)1)
+/* draw again, with their pictures, the strips around [top, top+rows)
+ * that were drawn while the pictures were put off; one strip per call.
+ * Returns 0: nothing to do, 1: done one, 2: done one on screen */
+int lay_fill_pending(layout_t *l, int32_t top, int rows);
+/* any strip waiting for its pictures */
+int lay_pending(const layout_t *l);
 
 /* link under document point (x, y), with a little slack; returns link
  * index or -1 and the fragment rectangle */

@@ -119,6 +119,9 @@ int main(int argc, char **argv)
 			ev(PE_TOUCH_UP, a, b, 0);
 		} else if (!strcmp(cmd, "down") && sscanf(arg, "%d %d", &a, &b) == 2) {
 			ev(PE_TOUCH_DOWN, a, b, 0);
+		} else if (!strcmp(cmd, "move") && sscanf(arg, "%d %d", &a, &b) == 2) {
+			host_clock += 20;
+			ev(PE_TOUCH_MOVE, a, b, 0);
 		} else if (!strcmp(cmd, "up") && sscanf(arg, "%d %d", &a, &b) == 2) {
 			ev(PE_TOUCH_UP, a, b, 0);
 		} else if (!strcmp(cmd, "press") && sscanf(arg, "%d %d %d", &a, &b, &c) == 3) {
@@ -165,6 +168,8 @@ int main(int argc, char **argv)
 			advance((uint32_t)ms);
 			ev(PE_BUTTON_UP, 0, 0, code);
 			advance(150);
+		} else if (!strcmp(cmd, "slowdraw") && sscanf(arg, "%d", &a) == 1) {
+			host_present_ms = (uint32_t)a;	/* a slow frame: a stall */
 		} else if (!strcmp(cmd, "wait") && sscanf(arg, "%d", &a) == 1) {
 			advance((uint32_t)a);
 		} else if (!strcmp(cmd, "shot")) {

@@ -531,6 +531,12 @@ static void draw_picture(layout_t *l, const lay_line_t *ln, uint8_t *buf, int y)
 	h = ps->h[k];
 	stride = (w + 7) >> 3;
 	bits = lay_pic_src ? lay_pic_src(l->doc, k) : NULL;
+	if (bits == LAY_PIC_PENDING) {
+		/* to be read when scrolling stops: a frame until then */
+		l->rendering_pend = 1;
+		gfx_rect(buf, SCREEN_STRIDE, STRIP_H, x0, y, w, h, BLACK);
+		return;
+	}
 	if (!bits) {
 		/* could not be read: a frame where it would be */
 		gfx_rect(buf, SCREEN_STRIDE, STRIP_H, x0, y, w, h, BLACK);
@@ -620,7 +626,9 @@ static uint8_t *strip(layout_t *l, int32_t sid)
 		if (l->strip_use[i] < l->strip_use[victim])
 			victim = i;
 	}
+	l->rendering_pend = 0;
 	render_strip(l, sid, l->strip_mem + victim * STRIP_H * SCREEN_STRIDE);
+	l->strip_pend[victim] = l->rendering_pend;
 	l->strip_id[victim] = sid;
 	l->strip_use[victim] = ++l->clock;
 	return l->strip_mem + victim * STRIP_H * SCREEN_STRIDE;
@@ -655,9 +663,50 @@ int lay_blit(layout_t *l, int32_t top, uint8_t *buf, int y0, int rows)
 	return ZW_OK;
 }
 
+int lay_pending(const layout_t *l)
+{
+	int i;
+	for (i = 0; i < STRIP_CACHE; ++i)
+		if (l->strip_id[i] >= 0 && l->strip_pend[i])
+			return 1;
+	return 0;
+}
+
+int lay_fill_pending(layout_t *l, int32_t top, int rows)
+{
+	int32_t a = (top - STRIP_H * 2) / STRIP_H, z = (top + rows + STRIP_H * 4) / STRIP_H;
+	int i, best = -1, best_vis = 0;
+	if (!l->strip_mem)
+		return 0;
+	for (i = 0; i < STRIP_CACHE; ++i) {
+		int32_t s = l->strip_id[i];
+		int vis;
+		if (s < 0 || !l->strip_pend[i])
+			continue;
+		if (s < a || s > z) {
+			/* far away now: drawn afresh if it is needed again */
+			l->strip_id[i] = -1;
+			l->strip_pend[i] = 0;
+			continue;
+		}
+		vis = (s + 1) * STRIP_H > top && s * STRIP_H < top + rows;
+		if (best < 0 || (vis && !best_vis)) {
+			best = i;
+			best_vis = vis;
+		}
+	}
+	if (best < 0)
+		return 0;
+	l->rendering_pend = 0;
+	render_strip(l, l->strip_id[best], l->strip_mem + best * STRIP_H * SCREEN_STRIDE);
+	l->strip_pend[best] = l->rendering_pend;
+	return best_vis ? 2 : 1;
+}
+
 void lay_prefetch(layout_t *l, int32_t top, int rows)
 {
-	int32_t a = (top - STRIP_H * 2) / STRIP_H, z = (top + rows + STRIP_H * 2) / STRIP_H, s;
+	/* further ahead below: a picture can be nearly a screen high */
+	int32_t a = (top - STRIP_H * 2) / STRIP_H, z = (top + rows + STRIP_H * 4) / STRIP_H, s;
 	if (!l->strip_mem || top == l->prefetched_top)
 		return;
 	if (a < 0)

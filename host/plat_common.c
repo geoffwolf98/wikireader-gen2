@@ -115,17 +115,36 @@ int plat_save(const char *name, const void *data, uint32_t len)
 	return ZW_OK;
 }
 
+uint32_t host_present_ms;	/* tests: each frame takes this long */
+
 void plat_present(const uint8_t *fb)
 {
 	memcpy(host_fb, fb, sizeof(host_fb));
 	host_presents++;
+	if (host_virtual_clock)
+		host_clock += host_present_ms;
 }
 
 uint32_t plat_ms(void)
 {
 	struct timespec ts;
-	if (host_virtual_clock)
+	if (host_virtual_clock) {
+		/* ZW_SECTOR_US: each sector read from the card takes this long
+		 * (tests of slow cards) */
+		static const char *e;
+		static int init;
+		static uint32_t seen, us;
+		if (!init) {
+			init = 1;
+			e = getenv("ZW_SECTOR_US");
+			us = e ? (uint32_t)atoi(e) : 0;
+		}
+		if (us && zw_stats.sectors_read != seen) {
+			host_clock += (zw_stats.sectors_read - seen) * us / 1000;
+			seen = zw_stats.sectors_read;
+		}
 		return host_clock;
+	}
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }

@@ -437,6 +437,31 @@ EOF2
 		build/c33emu device/build/init.elf "$P/card.img" "$P/app.txt" "$P/state" > "$P/emu.log" 2>&1 \
 			&& ok "pictures in articles (emulated)" || { bad "pictures in articles (emulated)"; grep FAIL "$P/emu.log"; }
 	fi
+	# scrolling never waits for the card: while the finger is down a
+	# picture not yet read is a frame, read once the page stops; and a
+	# slow frame (a stall) never turns into a fling
+	{
+		printf 'type long page\ntap 60 30\n'
+		i=0; while [ $i -lt 20 ]; do
+			printf 'down 120 200\nmove 120 160\nmove 120 120\nmove 120 80\nmove 120 40\n'
+			[ $i = 19 ] && printf 'describe\n'
+			printf 'up 120 40\n'
+			i=$((i + 1))
+		done
+		printf 'wait 3000\ndescribe\n'
+	} > "$P/swipe.txt"
+	rm -rf "$P/state"
+	ZW_SECTOR_US=8000 $B/zimwiki-headless "$P/card.img" "$P/swipe.txt" "$P/state" > "$P/swipe.log" 2>&1
+	grep -q "describe.*picwait" "$P/swipe.log" && tail -2 "$P/swipe.log" | grep "describe" | grep -v -q picwait \
+		&& ok "pictures read after scrolling, not during" || { bad "pictures read after scrolling, not during"; tail -5 "$P/swipe.log"; }
+	printf 'type long page\ntap 60 30\nslowdraw %s\ndown 120 200\nmove 120 180\nmove 120 160\nmove 120 140\nmove 120 120\nup 120 120\nslowdraw 0\nwait 2000\nexpect scroll=%s/\n' \
+		0 349 > "$P/fling1.txt"
+	printf 'type long page\ntap 60 30\nslowdraw %s\ndown 120 200\nmove 120 180\nmove 120 160\nmove 120 140\nmove 120 120\nup 120 120\nslowdraw 0\nwait 2000\nexpect scroll=%s/\n' \
+		80 80 > "$P/fling2.txt"
+	rm -rf "$P/state"
+	$B/zimwiki-headless "$P/card.img" "$P/fling1.txt" "$P/state" > "$P/fling.log" 2>&1 &&
+	{ rm -rf "$P/state"; $B/zimwiki-headless "$P/card.img" "$P/fling2.txt" "$P/state" >> "$P/fling.log" 2>&1; } \
+		&& ok "no fling after a stall (overscroll)" || { bad "no fling after a stall (overscroll)"; grep FAIL "$P/fling.log"; }
 	# pictures made from another ZIM are not used
 	mkdir -p "$P/card2/WIKI"
 	cp "$P/none"/WIKI.* "$P/card2/WIKI/"

@@ -119,11 +119,18 @@ int plat_sector_read(uint32_t lba, void *buf, uint32_t count)
 
 int plat_load(const char *name, uint8_t **data, uint32_t *len)
 {
+	return plat_load_max(name, 0xffffffffu, data, len);
+}
+
+int plat_load_max(const char *name, uint32_t max, uint8_t **data, uint32_t *len)
+{
 	unsigned long size = 0;
 	int h;
 	ssize_t n;
 	if (file_size(name, &size) != FILE_ERROR_OK)
 		return ZW_ENOTFOUND;
+	if (size > max)
+		size = max;
 	h = file_open(name, FILE_OPEN_READ);
 	if (h < 0)
 		return ZW_ENOTFOUND;

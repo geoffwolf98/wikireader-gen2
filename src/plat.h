@@ -28,6 +28,8 @@ int plat_sector_read(uint32_t lba, void *buf, uint32_t count);
 
 /* small files for state: name is 8.3 in the card root */
 int plat_load(const char *name, uint8_t **data, uint32_t *len);	/* zw_alloc'd */
+/* the same, at most max bytes (the start of the file) */
+int plat_load_max(const char *name, uint32_t max, uint8_t **data, uint32_t *len);
 int plat_save(const char *name, const void *data, uint32_t len);
 
 /* display: SCREEN_H rows of SCREEN_STRIDE bytes */

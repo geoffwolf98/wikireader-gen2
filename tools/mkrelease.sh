@@ -9,8 +9,8 @@
 #   kernel.elf, init.app, WIKIFONT.BIN, README.txt, every wiki folder found
 #   in STAGING, and source/zimwiki-VERSION.tar.gz (the complete source,
 #   which the GPL requires alongside the binaries).
-# The card files come from card/ (prebuilt) or device/build/card/ when you
-# have built them yourself; the wiki folders from STAGING (made by zimprep).
+# The card files come from card/ (init.app from device/build/ when that is
+# newer, and it must match the version); the wiki folders from STAGING (made by zimprep).
 # Default OUT is WikireaderGen2.VERSION.zip in the current folder.
 set -e
 Z=$(cd "$(dirname "$0")/.." && pwd)
@@ -21,12 +21,19 @@ FEEDBACK=${FEEDBACK:-"reply in the thread where you found this release."}
 V=$(sed -n 's/.*define ZW_VERSION "\(.*\)".*/\1/p' "$Z/src/zw.h")
 OUT=${2:-$PWD/WikireaderGen2.$V.zip}
 C=$Z/card
-[ -f "$Z/device/build/card/init.app" ] && C=$Z/device/build/card
+# init.app: a fresh device build if there is one, else card/; it must be
+# this version (an old build left lying around once slipped into a zip)
+APP=$C/init.app
+[ -f "$Z/device/build/init.app" ] && [ "$Z/device/build/init.app" -nt "$APP" ] && APP=$Z/device/build/init.app
+if ! strings "$APP" | grep -q "zimwiki $V"; then
+	echo "$APP is not version $V: build the device (make -C device) or copy init.app to card/" >&2
+	exit 1
+fi
 command -v zip >/dev/null || { echo "install zip (sudo apt install zip)"; exit 1; }
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 [ $src = 1 ] && mkdir -p "$T/source"
-cp "$C/kernel.elf" "$C/init.app" "$C/WIKIFONT.BIN" "$Z/card/ZWSTATE.DAT" "$T/"
+cp "$C/kernel.elf" "$APP" "$C/WIKIFONT.BIN" "$Z/card/ZWSTATE.DAT" "$T/"
 # placeholders zimprep did not make (wikis prepared with an older zimprep)
 for d in "$S"/*/; do
 	for f in "$d"*.IDX "$d"*.idx; do

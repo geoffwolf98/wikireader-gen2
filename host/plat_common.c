@@ -56,6 +56,11 @@ int plat_sector_read(uint32_t lba, void *buf, uint32_t count)
  * the card image when not there (e.g. WIKIFONT.BIN) */
 int plat_load(const char *name, uint8_t **data, uint32_t *len)
 {
+	return plat_load_max(name, 0xffffffffu, data, len);
+}
+
+int plat_load_max(const char *name, uint32_t max, uint8_t **data, uint32_t *len)
+{
 	char path[1200];
 	FILE *f;
 	long n;
@@ -66,6 +71,8 @@ int plat_load(const char *name, uint8_t **data, uint32_t *len)
 	fseek(f, 0, SEEK_END);
 	n = ftell(f);
 	fseek(f, 0, SEEK_SET);
+	if ((unsigned long)n > max)
+		n = (long)max;
 	*data = zw_alloc((size_t)n + 1);
 	if (!*data) {
 		fclose(f);

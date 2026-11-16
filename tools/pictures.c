@@ -21,7 +21,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <stdint.h>
 #include "pictures.h"
+#include "../host/hostio.h"
 #include "../src/pic.h"
 #include <zstd.h>
 
@@ -43,6 +45,8 @@
 #define BATCH_IMGS 256
 #define BATCH_MB   96
 
+int pic_dither = PIC_DITHER_ATKINSON;	/* crisper on the small screen, a little smaller */
+
 int pictures_supported(void)
 {
 #ifdef ZW_HAVE_WEBP
@@ -53,10 +57,10 @@ int pictures_supported(void)
 }
 
 #ifndef ZW_HAVE_WEBP
-long make_pictures(zim_t *z, const char *outdir, const char *name, int mode, int threads,
-		   const uint32_t *map, uint32_t entries, uint32_t shift)
+long make_pictures(zim_t *z, const char *input, const char *outdir, const char *name, int mode,
+		   int threads, const uint32_t *map, uint32_t entries, uint32_t shift)
 {
-	(void)z; (void)outdir; (void)name; (void)mode; (void)threads; (void)map; (void)shift;
+	(void)input; (void)z; (void)outdir; (void)name; (void)mode; (void)threads; (void)map; (void)shift;
 	(void)entries;
 	fprintf(stderr, "zimprep: built without picture support (install libwebp-dev and rebuild)\n");
 	return -1;
@@ -306,11 +310,12 @@ static int resolve(zim_t *z, char ns, const char *url, const char *src, uint32_t
 	return 0;
 }
 
-static void scan_article(zim_t *z, uint32_t entry, const zim_dirent_t *ad, const char *h, uint32_t n,
-			 int mode, const uint32_t *map)
+/* the pictures of one article: their src hashes and picture entries
+ * (no shared state: runs on any thread, with its own reader) */
+static int scan_one(zim_t *z, const zim_dirent_t *ad, const char *h, uint32_t n, int mode,
+		    uint32_t *hashes, uint32_t *pes)
 {
 	const char *p = h, *end = h + n;
-	uint32_t hashes[PIC_MAX], first = nrefs;
 	int count = 0;
 	while (p < end && count < (mode == PIC_MODE_LEAD ? 1 : PIC_MAX)) {
 		const char *t = memchr(p, '<', (size_t)(end - p)), *te;
@@ -357,19 +362,176 @@ static void scan_article(zim_t *z, uint32_t entry, const zim_dirent_t *ad, const
 				dup = 1;
 		if (dup)
 			continue;
+		pes[count] = pe;
 		hashes[count++] = hash;
+	}
+	return count;
+}
+
+/* main thread, in entry order: record an article's pictures */
+static void add_article(uint32_t entry, int count, const uint32_t *hashes, const uint32_t *pes,
+			const uint32_t *map)
+{
+	uint32_t first = nrefs;
+	int k;
+	if (!count)
+		return;
+	for (k = 0; k < count; ++k) {
 		refs = grow(refs, &refs_cap, nrefs + 1, sizeof(ref_t));
-		refs[nrefs].hash = hash;
-		refs[nrefs].img = img_index(pe);
+		refs[nrefs].hash = hashes[k];
+		refs[nrefs].img = img_index(pes[k]);
 		nrefs++;
 	}
-	if (count) {
-		arts = grow(arts, &arts_cap, narts + 1, sizeof(art_t));
-		arts[narts].entry = map ? map[entry] : entry;
-		arts[narts].first = first;
-		arts[narts].n = (uint8_t)count;
-		narts++;
+	arts = grow(arts, &arts_cap, narts + 1, sizeof(art_t));
+	arts[narts].entry = map ? map[entry] : entry;
+	arts[narts].first = first;
+	arts[narts].n = (uint8_t)count;
+	narts++;
+}
+
+/* the scan on all threads: blocks of entries, each read in cluster order
+ * by a thread with its own reader, merged in entry order */
+#define SCAN_BLOCK 16384
+
+typedef struct sres {
+	uint32_t n, cap;	/* found articles */
+	uint32_t *entry;
+	uint8_t *count;
+	uint32_t *hash, *pe;	/* count each, in order */
+	uint32_t npic, piccap;
+	int done;
+} sres_t;
+
+typedef struct scan {
+	const char *input;
+	int mode;
+	uint32_t entries, nblocks, next;
+	sres_t *res;
+	pthread_mutex_t m;
+	pthread_cond_t done;
+} scan_t;
+
+typedef struct ekey {
+	uint32_t cluster, blob, entry;
+} ekey_t;
+
+static int ekey_cmp(const void *a, const void *b)
+{
+	const ekey_t *x = a, *y = b;
+	if (x->cluster != y->cluster)
+		return x->cluster < y->cluster ? -1 : 1;
+	if (x->blob != y->blob)
+		return x->blob < y->blob ? -1 : 1;
+	return x->entry < y->entry ? -1 : x->entry > y->entry;
+}
+
+typedef struct hit {
+	uint32_t entry, at;	/* at: index into the block's hash/pe */
+	uint8_t count;
+} hit_t;
+
+static int hit_cmp(const void *a, const void *b)
+{
+	const hit_t *x = a, *y = b;
+	return x->entry < y->entry ? -1 : x->entry > y->entry;
+}
+
+static void *scan_worker(void *arg)
+{
+	scan_t *sc = arg;
+	host_files_t f;
+	zim_t z;
+	ekey_t *keys = malloc(sizeof(ekey_t) * SCAN_BLOCK);
+	hit_t *hits = malloc(sizeof(hit_t) * SCAN_BLOCK);
+	uint32_t *hash = NULL, *pe = NULL, hcap = 0;
+	if (host_files_open(&f, sc->input) < 0 || zim_open(&z, &f.io) < 0) {
+		fprintf(stderr, "zimprep: cannot open %s again\n", sc->input);
+		exit(1);
 	}
+	for (;;) {
+		uint32_t b, first, last, i, nk = 0, nh = 0, np = 0;
+		sres_t *r;
+		pthread_mutex_lock(&sc->m);
+		b = sc->next < sc->nblocks ? sc->next++ : UINT32_MAX;
+		pthread_mutex_unlock(&sc->m);
+		if (b == UINT32_MAX)
+			break;
+		first = b * SCAN_BLOCK;
+		last = first + SCAN_BLOCK < sc->entries ? first + SCAN_BLOCK : sc->entries;
+		for (i = first; i < last; ++i) {
+			zim_dirent_t d;
+			if (zim_dirent(&z, i, &d) < 0 || d.mime == ZIM_MIME_REDIRECT ||
+			    d.mime == ZIM_MIME_LINKTARGET || d.mime == ZIM_MIME_DELETED ||
+			    d.mime >= z.nmime || strncmp(z.mime[d.mime], "text/html", 9) != 0)
+				continue;
+			keys[nk].cluster = d.cluster;
+			keys[nk].blob = d.blob;
+			keys[nk].entry = i;
+			nk++;
+		}
+		qsort(keys, nk, sizeof(ekey_t), ekey_cmp);
+		for (i = 0; i < nk; ++i) {
+			zim_dirent_t d;
+			const uint8_t *data;
+			uint32_t len, hh[PIC_MAX], pp[PIC_MAX];
+			int c, k;
+			char *h;
+			if (zim_dirent(&z, keys[i].entry, &d) < 0 ||
+			    zim_blob(&z, d.cluster, d.blob, &data, &len) < 0)
+				continue;
+			/* the blob lives in the reader's cache: copy, resolving
+			 * src reads the ZIM again */
+			h = malloc(len ? len : 1);
+			memcpy(h, data, len);
+			c = scan_one(&z, &d, h, len, sc->mode, hh, pp);
+			free(h);
+			if (!c)
+				continue;
+			if (np + (uint32_t)c > hcap) {
+				hcap = hcap ? hcap * 2 : 1024;
+				while (hcap < np + (uint32_t)c)
+					hcap *= 2;
+				hash = realloc(hash, sizeof(uint32_t) * hcap);
+				pe = realloc(pe, sizeof(uint32_t) * hcap);
+			}
+			hits[nh].entry = keys[i].entry;
+			hits[nh].at = np;
+			hits[nh].count = (uint8_t)c;
+			nh++;
+			for (k = 0; k < c; ++k) {
+				hash[np + (uint32_t)k] = hh[k];
+				pe[np + (uint32_t)k] = pp[k];
+			}
+			np += (uint32_t)c;
+		}
+		/* back in entry order for the merge */
+		qsort(hits, nh, sizeof(hit_t), hit_cmp);
+		r = &sc->res[b];
+		r->n = nh;
+		r->entry = malloc(sizeof(uint32_t) * (nh ? nh : 1));
+		r->count = malloc(nh ? nh : 1);
+		r->hash = malloc(sizeof(uint32_t) * (np ? np : 1));
+		r->pe = malloc(sizeof(uint32_t) * (np ? np : 1));
+		r->npic = 0;
+		for (i = 0; i < nh; ++i) {
+			r->entry[i] = hits[i].entry;
+			r->count[i] = hits[i].count;
+			memcpy(r->hash + r->npic, hash + hits[i].at, 4u * hits[i].count);
+			memcpy(r->pe + r->npic, pe + hits[i].at, 4u * hits[i].count);
+			r->npic += hits[i].count;
+		}
+		pthread_mutex_lock(&sc->m);
+		r->done = 1;
+		pthread_cond_broadcast(&sc->done);
+		pthread_mutex_unlock(&sc->m);
+	}
+	zim_close(&z);
+	host_files_close(&f);
+	free(keys);
+	free(hits);
+	free(hash);
+	free(pe);
+	return NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -468,6 +630,30 @@ static uint8_t *dither(uint8_t *g, int w, int h)
 				e[y * w + x] = (int16_t)(v < 0 ? 0 : v > 255 ? 255 : v);
 			}
 		free(c);
+	}
+	if (pic_dither == PIC_DITHER_ATKINSON) {
+		/* Atkinson: 6/8 of the error to six neighbours, the rest
+		 * dropped: cleaner light and dark areas, fewer stray dots */
+#define ADD(xx, yy) do { int ax_ = (xx), ay_ = (yy); \
+		if (ax_ >= 0 && ax_ < w && ay_ < h) \
+			e[ay_ * w + ax_] = (int16_t)(e[ay_ * w + ax_] + err / 8); } while (0)
+		for (y = 0; y < h; ++y) {
+			int ltr = !(y & 1), xs = ltr ? 0 : w - 1, dx = ltr ? 1 : -1;
+			for (x = xs; x >= 0 && x < w; x += dx) {
+				int old = e[y * w + x], nw = old < 128 ? 0 : 255, err = old - nw;
+				if (!nw)
+					bits[y * stride + (x >> 3)] |= (uint8_t)(0x80 >> (x & 7));
+				ADD(x + dx, y);
+				ADD(x + 2 * dx, y);
+				ADD(x - dx, y + 1);
+				ADD(x, y + 1);
+				ADD(x + dx, y + 1);
+				ADD(x, y + 2);
+			}
+		}
+#undef ADD
+		free(e);
+		return bits;
 	}
 	for (y = 0; y < h; ++y) {
 		int ltr = !(y & 1), xs = ltr ? 0 : w - 1, dx = ltr ? 1 : -1;
@@ -627,8 +813,8 @@ static int cmp_img_entry(const void *a, const void *b)
 	return x < y ? -1 : x > y;
 }
 
-long make_pictures(zim_t *z, const char *outdir, const char *name, int mode, int threads,
-		   const uint32_t *map, uint32_t entries, uint32_t shift)
+long make_pictures(zim_t *z, const char *input, const char *outdir, const char *name, int mode,
+		   int threads, const uint32_t *map, uint32_t entries, uint32_t shift)
 {
 	uint32_t i, *order, done_imgs = 0, nconv = 0;
 	uint64_t raw_total = 0;
@@ -640,31 +826,51 @@ long make_pictures(zim_t *z, const char *outdir, const char *name, int mode, int
 	int t;
 	char rm[1100];
 
-	t0 = t_stage = time(NULL);
+	t0 = zimprep_start ? zimprep_start : time(NULL);
+	t_stage = time(NULL);
 	img_tab_mask = 4095;
 	img_tab = calloc(img_tab_mask + 1, sizeof(uint32_t));
 
-	/* 1. scan */
-	for (i = 0; i < z->entry_count; ++i) {
-		zim_dirent_t d;
-		const uint8_t *data;
-		uint32_t len;
-		if ((i & 0x3fff) == 0)
-			progress("finding pictures", i, z->entry_count);
-		if (zim_dirent(z, i, &d) < 0 || d.mime == ZIM_MIME_REDIRECT ||
-		    d.mime == ZIM_MIME_LINKTARGET || d.mime == ZIM_MIME_DELETED ||
-		    d.mime >= z->nmime || strncmp(z->mime[d.mime], "text/html", 9) != 0)
-			continue;
-		if (zim_blob(z, d.cluster, d.blob, &data, &len) < 0)
-			continue;
-		/* the blob lives in the reader's cache: copy, resolving src
-		 * reads the ZIM again */
-		{
-			char *h = malloc(len ? len : 1);
-			memcpy(h, data, len);
-			scan_article(z, i, &d, h, len, mode, map);
-			free(h);
+	/* 1. scan, on all threads */
+	if (threads < 1)
+		threads = 1;
+	if (threads > 64)
+		threads = 64;
+	fprintf(stderr, "finding and converting pictures on %d thread%s\n", threads, threads == 1 ? "" : "s");
+	{
+		scan_t sc;
+		uint32_t b, k;
+		memset(&sc, 0, sizeof(sc));
+		sc.input = input;
+		sc.mode = mode;
+		sc.entries = z->entry_count;
+		sc.nblocks = (z->entry_count + SCAN_BLOCK - 1) / SCAN_BLOCK;
+		sc.res = calloc(sc.nblocks ? sc.nblocks : 1, sizeof(sres_t));
+		pthread_mutex_init(&sc.m, NULL);
+		pthread_cond_init(&sc.done, NULL);
+		for (t = 0; t < threads; ++t)
+			pthread_create(&th[t], NULL, scan_worker, &sc);
+		for (b = 0; b < sc.nblocks; ++b) {
+			sres_t *r = &sc.res[b];
+			uint32_t at = 0;
+			pthread_mutex_lock(&sc.m);
+			while (!r->done)
+				pthread_cond_wait(&sc.done, &sc.m);
+			pthread_mutex_unlock(&sc.m);
+			for (k = 0; k < r->n; ++k) {
+				add_article(r->entry[k], r->count[k], r->hash + at, r->pe + at, map);
+				at += r->count[k];
+			}
+			free(r->entry);
+			free(r->count);
+			free(r->hash);
+			free(r->pe);
+			progress("finding pictures", (uint64_t)(b + 1) * SCAN_BLOCK < z->entry_count ?
+				 (b + 1) * SCAN_BLOCK : z->entry_count, z->entry_count);
 		}
+		for (t = 0; t < threads; ++t)
+			pthread_join(th[t], NULL);
+		free(sc.res);
 	}
 	progress("finding pictures", z->entry_count, z->entry_count);
 	stage_done("finding pictures");
@@ -692,10 +898,6 @@ long make_pictures(zim_t *z, const char *outdir, const char *name, int mode, int
 	for (i = 0; i < nimgs; ++i)
 		order[i] = i;
 	qsort(order, nimgs, sizeof(uint32_t), cmp_img_entry);
-	if (threads < 1)
-		threads = 1;
-	if (threads > 64)
-		threads = 64;
 	memset(&pool, 0, sizeof(pool));
 	pthread_mutex_init(&pool.m, NULL);
 	pthread_cond_init(&pool.go, NULL);

@@ -43,7 +43,7 @@ for z in $zims; do
 	# 3. recluster, still a valid ZIM with identical content
 	if [ $have_libzim = 1 ]; then
 		rm -rf "$T/rc"
-		$B/zimprep --recluster 64 --level 3 --keep-fulltext --keep-images "$z" "$T/rc" > /dev/null 2>&1
+		$B/zimprep --recluster 64 --level 3 --keep-fulltext --keep-images --no-slim "$z" "$T/rc" > /dev/null 2>&1
 		cat "$T"/rc/WIKI.Z* > "$T/rc.zim"
 		python3 tests/refdump.py "$T/rc.zim" > "$T/rc.txt"
 		python3 -c "from libzim.reader import Archive; import sys; sys.exit(0 if Archive('$T/rc.zim').check() else 1)" \
@@ -95,12 +95,16 @@ for i, d in enumerate(da):
         listing = key[0] == 'X' and key[1].startswith('listing/')
         if idx:
             ok = ok and y.get_item().size == 0
-        elif not listing:
+        elif not listing and not x.get_item().mimetype.startswith('text/html'):
             ok = ok and bytes(x.get_item().content) == bytes(y.get_item().content)
     if not ok:
         break
 sys.exit(0 if ok else 1)
 PY
+		# the slimmed articles convert as the originals did (every
+		# combination of Footnotes, Citations and Pictures)
+		$B/slimcheck --pair "$z" "$T/rc2.zim" > "$T/slim.txt" 2>&1 \
+			&& ok "slimmed articles unchanged: $n" || { bad "slimmed articles unchanged: $n"; head -5 "$T/slim.txt"; }
 		# a ZIM without a usable title list in its header (some newer
 		# Kiwix ZIMs): zimprep rebuilds it, the same as the original
 		python3 - "$z" "$T/notitles.zim" <<'PY'
@@ -308,6 +312,48 @@ fi
 
 $B/calctest > "$T/calc.txt" 2>&1 && ok "calculator core" || { bad "calculator core"; cat "$T/calc.txt"; }
 
+# a wiki on a badly fragmented card: its file map (here ~89 KB, more than
+# the 64 KB read first) is saved and read back in full at the next start
+CLIM="$ZIM_TESTS/nons/wikipedia_en_climate_change_mini_2024-06.zim"
+if [ -n "$ZIM_TESTS" ] && [ -f "$CLIM" ]; then
+	F=$T/frag
+	rm -rf "$F" && mkdir -p "$F/fill" "$F/state/WIKI"
+	python3 -c "
+import os
+for d in range(7):
+    os.makedirs('$F/fill/D%d' % d)
+    for i in range(10000): open('$F/fill/D%d/f%05d' % (d, i), 'wb').write(b'x' * 400)"
+	truncate -s 34M "$F/card.img"
+	printf 'label: dos\nstart=2048, type=c\n' | sfdisk -q "$F/card.img"
+	mkfs.vfat -F 32 -s 1 --offset 2048 "$F/card.img" > /dev/null
+	MTOOLS_SKIP_CHECK=1 mcopy -s -i "$F/card.img@@1M" "$F/fill" ::FILL > /dev/null 2>&1 || true
+	python3 -c "
+for d in range(7):
+    for i in range(0, 10000, 2): print('::FILL/D%d/f%05d' % (d, i))" |
+		MTOOLS_SKIP_CHECK=1 xargs -n 2000 mdel -i "$F/card.img@@1M" 2>/dev/null || true
+	$B/zimprep --recluster --no-slim --keep-images "$CLIM" "$F/wiki" > /dev/null 2>&1
+	MTOOLS_SKIP_CHECK=1 mmd -i "$F/card.img@@1M" ::WIKI
+	MTOOLS_SKIP_CHECK=1 mcopy -i "$F/card.img@@1M" "$F/wiki/WIKI.Z00" "$F/wiki/WIKI.IDX" ::WIKI/
+	cp "$F/wiki/WIKI.EXT" "$F/state/WIKI/WIKI.EXT"
+	printf 'stats\n' > "$F/s.txt"
+	$B/zimwiki-headless "$F/card.img" "$F/s.txt" "$F/state" > "$F/1.log" 2>&1
+	$B/zimwiki-headless "$F/card.img" "$F/s.txt" "$F/state" > "$F/2.log" 2>&1
+	s1=$(grep -o '[0-9]* sectors' "$F/1.log" | head -1 | cut -d' ' -f1)
+	s2=$(grep -o '[0-9]* sectors' "$F/2.log" | head -1 | cut -d' ' -f1)
+	ext=$(wc -c < "$F/state/WIKI/WIKI.EXT")
+	[ "$ext" -gt 65536 ] && [ "$s2" -lt "$s1" ] \
+		&& ok "file map over 64 KB saved and reused" || bad "file map over 64 KB saved and reused (map $ext bytes, $s1 then $s2 sectors)"
+	[ "$(wc -c < "$F/wiki/WIKI.EXT")" = 262144 ] && ok "zimprep makes a 256 KB file map" || bad "zimprep makes a 256 KB file map"
+fi
+
+# slimming: awkward HTML (ticks, pre, maths, notes, boxes, odd markup)
+# converts the same slimmed
+if python3 -c "import libzim" 2>/dev/null; then
+	python3 tests/mkslimzim.py "$T/slimtest.zim" > /dev/null 2>&1
+	$B/slimcheck "$T/slimtest.zim" > "$T/slimtest.txt" 2>&1 \
+		&& ok "slimming: awkward HTML unchanged" || { bad "slimming: awkward HTML unchanged"; cat "$T/slimtest.txt"; }
+fi
+
 # pictures (zimprep --pictures): a maxi style test ZIM made from the
 # climate change ZIM's pictures (needs libzim and Pillow for Python, and a
 # zimprep built with libwebp)
@@ -359,9 +405,13 @@ PY
 	[ ! -e "$P/none/WIKI.P00" ] && ok "no pictures unless asked" || bad "no pictures unless asked"
 	# --add-pictures: the same files as making them with the wiki
 	rm -rf "$P/add" && cp -r "$P/none" "$P/add"
-	$B/zimprep --add-pictures all "$P/pictest.zim" "$P/add" > "$P/add.log" 2>&1 &&
+	$B/zimprep --threads 2 --add-pictures all "$P/pictest.zim" "$P/add" > "$P/add.log" 2>&1 &&
 	cmp -s "$P/add/WIKI.P00" "$P/all/WIKI.P00" && cmp -s "$P/add/WIKI.Z00" "$P/none/WIKI.Z00" \
 		&& ok "--add-pictures to a prepared wiki" || { bad "--add-pictures to a prepared wiki"; cat "$P/add.log"; }
+	# ... on all CPUs by default (it once used one)
+	rm -rf "$P/add3" && cp -r "$P/none" "$P/add3"
+	$B/zimprep --add-pictures lead "$P/pictest.zim" "$P/add3" 2>&1 | grep -q "on $(nproc) thread" \
+		&& ok "--add-pictures uses all CPUs" || bad "--add-pictures uses all CPUs"
 	# ... refused for a wiki made from another ZIM
 	! $B/zimprep --add-pictures lead "$CLIMATE" "$P/add" > "$P/add2.log" 2>&1 &&
 	grep -q "another ZIM" "$P/add2.log" && cmp -s "$P/add/WIKI.P00" "$P/all/WIKI.P00" \
@@ -374,6 +424,16 @@ PY
 	cp "$P/all/WIKI.P00" "$P/none/"
 	$B/zimprep --recluster 64 --level 3 "$P/pictest.zim" "$P/none" > /dev/null 2>&1
 	[ ! -e "$P/none/WIKI.P00" ] && ok "old picture files removed" || bad "old picture files removed"
+	# the same files whatever the number of threads
+	rm -rf "$P/t1"
+	$B/zimprep --recluster 64 --level 3 --threads 1 --pictures all "$P/pictest.zim" "$P/t1" > /dev/null 2>&1
+	cmp -s "$P/t1/WIKI.P00" "$P/all/WIKI.P00" && cmp -s "$P/t1/WIKI.Z00" "$P/all/WIKI.Z00" \
+		&& ok "same output on one thread" || bad "same output on one thread"
+	# Atkinson by default; Floyd-Steinberg on request (bigger files)
+	rm -rf "$P/fs"
+	$B/zimprep --recluster 64 --level 3 --dither fs --pictures all "$P/pictest.zim" "$P/fs" > /dev/null 2>&1
+	[ "$(wc -c < "$P/all/WIKI.P00")" -lt "$(wc -c < "$P/fs/WIKI.P00")" ] \
+		&& ok "Atkinson pictures by default (smaller than --dither fs)" || bad "Atkinson pictures by default (smaller than --dither fs)"
 	# compressed bitmaps (version 2)
 	python3 tests/picdump.py "$P/all/WIKI" | grep -q "version 2, [1-9][0-9]* compressed" \
 		&& ok "picture bitmaps compressed" || bad "picture bitmaps compressed"

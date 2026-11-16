@@ -19,6 +19,7 @@
 
 #include "../src/zim.h"
 #include "recluster.h"
+#include "slim.h"
 
 /* ------------------------------------------------------------------ */
 /* MD5 (RFC 1321), for the ZIM checksum */
@@ -180,52 +181,109 @@ static void cw_read(cw_t *w, uint64_t off, void *data, size_t len)
 
 #define BIG_CLUSTER (16u << 20)
 
-typedef struct job {
+/* One pool of threads does two kinds of work: slimming the HTML of the
+ * blobs the main thread has just read (a segment at a time), and packing
+ * and compressing clusters, which the main thread hands out in order and
+ * writes out in order as they finish.  So reading, slimming and
+ * compressing overlap instead of taking turns. */
+
+typedef struct sblob {
+	uint8_t *data;
+	uint32_t len;
+	uint8_t html;
+} sblob_t;
+
+typedef struct cjob {
 	uint8_t *raw;		/* offsets table + blobs */
 	size_t raw_len;
 	uint8_t *out;
 	size_t out_len;
-} job_t;
+	int done;
+} cjob_t;
 
-typedef struct pool {
-	job_t *jobs;
-	int njobs, next, level;
+typedef struct pipe {
 	pthread_mutex_t mu;
-} pool_t;
+	pthread_cond_t work, progress;
+	int level, quit;
+	/* slimming: the current segment */
+	sblob_t *seg;
+	uint32_t *slim_idx;	/* which of seg are HTML */
+	uint32_t slim_next, slim_done, slim_total;
+	uint64_t slim_before, slim_after;
+	/* compression: a ring of jobs, [head, tail) in flight */
+	cjob_t *ring;
+	uint32_t cap, head, next, tail;
+} pipe_t;
+
+static void compress_job(cjob_t *j, ZSTD_CCtx *cc)
+{
+	size_t cap, r;
+	if (j->raw_len > BIG_CLUSTER) {
+		/* already compressed media and the like: level 19 on one core
+		 * would take hours for little gain */
+		j->out = malloc(j->raw_len + 1);
+		j->out[0] = 1;	/* uncompressed cluster */
+		memcpy(j->out + 1, j->raw, j->raw_len);
+		j->out_len = j->raw_len + 1;
+		return;
+	}
+	cap = ZSTD_compressBound(j->raw_len) + 1;
+	j->out = malloc(cap);
+	j->out[0] = 5;	/* zstd cluster */
+	r = ZSTD_compress2(cc, j->out + 1, cap - 1, j->raw, j->raw_len);
+	if (ZSTD_isError(r)) {
+		fprintf(stderr, "zstd: %s\n", ZSTD_getErrorName(r));
+		exit(1);
+	}
+	j->out_len = r + 1;
+}
+
+static void slim_blob(sblob_t *b, pipe_t *p)
+{
+	uint8_t *o = malloc(2 * (size_t)b->len + 256);
+	size_t n = html_slim((const char *)b->data, b->len, (char *)o);
+	pthread_mutex_lock(&p->mu);
+	p->slim_before += b->len;
+	p->slim_after += n;
+	pthread_mutex_unlock(&p->mu);
+	if (n < b->len) {
+		free(b->data);
+		b->data = o;
+		b->len = (uint32_t)n;
+	} else {
+		free(o);
+	}
+}
 
 static void *worker(void *arg)
 {
-	pool_t *p = arg;
+	pipe_t *p = arg;
 	ZSTD_CCtx *cc = ZSTD_createCCtx();
 	ZSTD_CCtx_setParameter(cc, ZSTD_c_compressionLevel, p->level);
 	ZSTD_CCtx_setParameter(cc, ZSTD_c_checksumFlag, 0);
+	pthread_mutex_lock(&p->mu);
 	for (;;) {
-		job_t *j;
-		size_t cap, r;
-		pthread_mutex_lock(&p->mu);
-		j = p->next < p->njobs ? &p->jobs[p->next++] : NULL;
-		pthread_mutex_unlock(&p->mu);
-		if (!j)
+		if (p->slim_next < p->slim_total) {
+			sblob_t *b = &p->seg[p->slim_idx[p->slim_next++]];
+			pthread_mutex_unlock(&p->mu);
+			slim_blob(b, p);
+			pthread_mutex_lock(&p->mu);
+			p->slim_done++;
+			pthread_cond_broadcast(&p->progress);
+		} else if (p->next < p->tail) {
+			cjob_t *j = &p->ring[p->next++ % p->cap];
+			pthread_mutex_unlock(&p->mu);
+			compress_job(j, cc);
+			pthread_mutex_lock(&p->mu);
+			j->done = 1;
+			pthread_cond_broadcast(&p->progress);
+		} else if (p->quit) {
 			break;
-		if (j->raw_len > BIG_CLUSTER) {
-			/* already compressed media and the like: level 19 on
-			 * one core would take hours for little gain */
-			j->out = malloc(j->raw_len + 1);
-			j->out[0] = 1;	/* uncompressed cluster */
-			memcpy(j->out + 1, j->raw, j->raw_len);
-			j->out_len = j->raw_len + 1;
-			continue;
+		} else {
+			pthread_cond_wait(&p->work, &p->mu);
 		}
-		cap = ZSTD_compressBound(j->raw_len) + 1;
-		j->out = malloc(cap);
-		j->out[0] = 5;	/* zstd cluster */
-		r = ZSTD_compress2(cc, j->out + 1, cap - 1, j->raw, j->raw_len);
-		if (ZSTD_isError(r)) {
-			fprintf(stderr, "zstd: %s\n", ZSTD_getErrorName(r));
-			exit(1);
-		}
-		j->out_len = r + 1;
 	}
+	pthread_mutex_unlock(&p->mu);
 	ZSTD_freeCCtx(cc);
 	return NULL;
 }
@@ -467,7 +525,7 @@ uint32_t *image_map(zim_t *z, uint32_t *out_entries, uint32_t *out_pics, uint32_
 }
 
 int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, int level,
-	      int threads, int keep_fulltext, int keep_images, uint32_t **out_map,
+	      int threads, int keep_fulltext, int keep_images, int slim, uint32_t **out_map,
 	      uint32_t *out_entries, uint64_t *out_size, uint32_t *out_chunks)
 {
 	uint32_t dropped = 0;
@@ -481,16 +539,13 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 	uint32_t *new_cluster, *new_blob;	/* per entry */
 	uint64_t *cluster_off, data_off, pos;
 	uint8_t *raw = NULL;
-	size_t raw_cap = 0, raw_len = 0;
-	uint32_t *blob_len = NULL, nblobs = 0, cap_blobs = 0;
-	uint8_t **blob_data = NULL;
+	size_t raw_len = 0;
 	uint64_t mime_len, url_ptr_pos, title_ptr_pos, dirent_pos, cluster_ptr_pos;
 	uint8_t hdr[80], dbuf[4096], md5[16];
 	size_t target = (size_t)target_kb * 1024;
-	pool_t pool;
-	job_t *jobs = NULL;
-	int njobs = 0, cap_jobs = 0;
-	uint8_t *tmp_path_data;
+	pipe_t pipe;
+	pthread_t th[64];
+	time_t t_read = 0, t_wait_slim = 0, t_wait_comp = 0;
 	FILE *tmp;
 	char tmp_path[4200];
 	uint64_t tmp_len = 0;
@@ -503,12 +558,13 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 	refs = malloc(sizeof(ref_t) * z->entry_count);
 	cluster_off = malloc(sizeof(uint64_t) * cap_clusters);
 
-	t_start = t_stage = time(NULL);
+	t_start = zimprep_start ? zimprep_start : time(NULL);
+	t_stage = time(NULL);
 	listing = calloc(z->entry_count ? z->entry_count : 1, 1);
 	/* the title list first: a problem shows in minutes, not hours */
 	titles = title_list(z);
 	/* 0. pictures, and redirects that end at one, are left out (the
-	 * WikiReader shows no pictures); the rest are renumbered in order,
+	 * WikiReader cannot use them: --pictures makes its own); the rest are renumbered in order,
 	 * which keeps the URL order the ZIM format requires */
 	if (!keep_images)
 		map = image_map(z, &nentries, &npics, &npicredir);
@@ -521,6 +577,9 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 			continue;
 		if (zim_dirent(z, i, &d) == 0 && d.mime < z->nmime && is_listing(z, d.mime))
 			listing[i] = 1;
+		else if (slim && zim_dirent(z, i, &d) == 0 && d.mime < z->nmime &&
+			 !strncmp(z->mime[d.mime], "text/html", 9))
+			listing[i] = 2;	/* HTML: slimmed */
 		if (zim_dirent(z, i, &d) == 0 && d.cluster != ZIM_NONE && !keep_fulltext &&
 		    is_search_index(&d)) {
 			new_cluster[i] = ZIM_NONE - 1;	/* gets an empty blob below */
@@ -542,140 +601,239 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 		perror(tmp_path);
 		exit(1);
 	}
-	pthread_mutex_init(&pool.mu, NULL);
-	pool.level = level;
-	(void)tmp_path_data;
+	memset(&pipe, 0, sizeof(pipe));
+	pthread_mutex_init(&pipe.mu, NULL);
+	pthread_cond_init(&pipe.work, NULL);
+	pthread_cond_init(&pipe.progress, NULL);
+	pipe.level = level;
+	if (threads < 1)
+		threads = 1;
+	if (threads > 64)
+		threads = 64;
+	pipe.cap = (uint32_t)threads * 8;
+	pipe.ring = calloc(pipe.cap, sizeof(cjob_t));
+	for (i = 0; i < (uint32_t)threads; ++i)
+		pthread_create(&th[i], NULL, worker, &pipe);
 
-#define FLUSH_JOBS() do { \
-		pthread_t th[64]; int t; \
-		pool.jobs = jobs; pool.njobs = njobs; pool.next = 0; \
-		for (t = 0; t < threads; ++t) pthread_create(&th[t], NULL, worker, &pool); \
-		for (t = 0; t < threads; ++t) pthread_join(th[t], NULL); \
-		for (t = 0; t < njobs; ++t) { \
+/* write out the finished jobs at the head of the ring, in order (called
+ * with pipe.mu held) */
+#define WRITE_DONE() do { \
+		while (pipe.head < pipe.next && pipe.ring[pipe.head % pipe.cap].done) { \
+			cjob_t *j_ = &pipe.ring[pipe.head % pipe.cap]; \
+			pthread_mutex_unlock(&pipe.mu); \
 			if (nclusters == cap_clusters) { cap_clusters *= 2; \
 				cluster_off = realloc(cluster_off, sizeof(uint64_t) * cap_clusters); } \
 			cluster_off[nclusters++] = tmp_len; \
-			if (fwrite(jobs[t].out, 1, jobs[t].out_len, tmp) != jobs[t].out_len) { \
+			if (fwrite(j_->out, 1, j_->out_len, tmp) != j_->out_len) { \
 				perror("write"); exit(1); } \
-			tmp_len += jobs[t].out_len; \
-			free(jobs[t].out); free(jobs[t].raw); } \
-		njobs = 0; } while (0)
+			tmp_len += j_->out_len; \
+			free(j_->out); free(j_->raw); \
+			memset(j_, 0, sizeof(*j_)); \
+			pthread_mutex_lock(&pipe.mu); \
+			pipe.head++; } } while (0)
 
-	i = 0;
-	while (i < nrefs) {
-		/* gather blobs up to the target size */
-		uint32_t start = i, k;
-		size_t total = 0;
-		nblobs = 0;
-		while (i < nrefs && (total < target || nblobs == 0)) {
-			const uint8_t *p;
-			uint32_t len;
-			/* entries sharing a blob keep sharing it */
-			if (i > start && refs[i].cluster == refs[i - 1].cluster &&
-			    refs[i].blob == refs[i - 1].blob) {
-				new_cluster[refs[i].entry] = nclusters + (uint32_t)njobs;
-				new_blob[refs[i].entry] = nblobs - 1;
-				i++;
-				continue;
-			}
-			if (zim_blob(z, refs[i].cluster, refs[i].blob, &p, &len) < 0) {
-				fprintf(stderr, "zimprep: cannot read entry %u\n", refs[i].entry);
-				exit(1);
-			}
-			if (nblobs == cap_blobs) {
-				cap_blobs = cap_blobs ? cap_blobs * 2 : 256;
-				blob_len = realloc(blob_len, sizeof(uint32_t) * cap_blobs);
-				blob_data = realloc(blob_data, sizeof(uint8_t *) * cap_blobs);
-			}
-			blob_len[nblobs] = len;
-			blob_data[nblobs] = malloc(len ? len : 1);
-			memcpy(blob_data[nblobs], p, len);
-			if (map && listing[refs[i].entry]) {
-				/* title listing: renumber, leaving out removed
-				 * entries */
-				uint32_t k2, n2 = 0;
-				for (k2 = 0; k2 + 4 <= len; k2 += 4) {
-					uint32_t e = zw_rd32(blob_data[nblobs] + k2);
-					if (e < z->entry_count && map[e] != ZIM_NONE) {
-						zw_wr32(blob_data[nblobs] + n2, map[e]);
-						n2 += 4;
-					}
+/* hand a packed cluster to the workers (waits for room in the ring) */
+#define SUBMIT(r_, n_) do { \
+		time_t t0_ = time(NULL); \
+		pthread_mutex_lock(&pipe.mu); \
+		for (;;) { \
+			WRITE_DONE(); \
+			if (pipe.tail - pipe.head < pipe.cap) break; \
+			pthread_cond_wait(&pipe.progress, &pipe.mu); } \
+		pipe.ring[pipe.tail % pipe.cap].raw = (r_); \
+		pipe.ring[pipe.tail % pipe.cap].raw_len = (n_); \
+		pipe.ring[pipe.tail % pipe.cap].done = 0; \
+		pipe.tail++; \
+		pthread_cond_broadcast(&pipe.work); \
+		pthread_mutex_unlock(&pipe.mu); \
+		t_wait_comp += time(NULL) - t0_; } while (0)
+
+	{
+		/* a segment: about 64 MB of blobs read in order, slimmed in
+		 * parallel, then packed into clusters of ~target bytes */
+		const size_t seg_bytes = (size_t)64 << 20;
+		uint32_t seg_cap = 65536, *ref_blob = malloc(sizeof(uint32_t) * 65536);
+		uint32_t *slim_idx = malloc(sizeof(uint32_t) * 65536);
+		sblob_t *seg = malloc(sizeof(sblob_t) * seg_cap);
+		uint32_t cluster_id = 0;	/* clusters handed out so far */
+		i = 0;
+		while (i < nrefs) {
+			uint32_t start = i, nseg = 0, k, b, nb;
+			size_t bytes = 0;
+			time_t t0 = time(NULL);
+			/* read */
+			while (i < nrefs && nseg < seg_cap && i - start < seg_cap &&
+			       (bytes < seg_bytes || nseg == 0)) {
+				const uint8_t *p;
+				uint32_t len;
+				/* entries sharing a blob keep sharing it */
+				if (i > start && refs[i].cluster == refs[i - 1].cluster &&
+				    refs[i].blob == refs[i - 1].blob) {
+					ref_blob[i - start] = nseg - 1;
+					i++;
+					continue;
 				}
-				len = n2;
-				blob_len[nblobs] = len;
+				if (zim_blob(z, refs[i].cluster, refs[i].blob, &p, &len) < 0) {
+					fprintf(stderr, "zimprep: cannot read entry %u\n", refs[i].entry);
+					exit(1);
+				}
+				seg[nseg].data = malloc(len ? len : 1);
+				memcpy(seg[nseg].data, p, len);
+				seg[nseg].len = len;
+				seg[nseg].html = listing[refs[i].entry] == 2;
+				if (map && listing[refs[i].entry] == 1) {
+					/* title listing: renumber, leaving out removed
+					 * entries */
+					uint32_t k2, n2 = 0;
+					for (k2 = 0; k2 + 4 <= len; k2 += 4) {
+						uint32_t e = zw_rd32(seg[nseg].data + k2);
+						if (e < z->entry_count && map[e] != ZIM_NONE) {
+							zw_wr32(seg[nseg].data + n2, map[e]);
+							n2 += 4;
+						}
+					}
+					seg[nseg].len = n2;
+				}
+				ref_blob[i - start] = nseg;
+				bytes += seg[nseg].len;
+				nseg++;
+				i++;
 			}
-			new_cluster[refs[i].entry] = nclusters + (uint32_t)njobs;
-			new_blob[refs[i].entry] = nblobs;
-			nblobs++;
-			total += len;
-			i++;
+			t_read += time(NULL) - t0;
+			/* slim (all threads; the previous segment's clusters are
+			 * still being compressed meanwhile).  Non-HTML blobs are
+			 * counted as done at once */
+			t0 = time(NULL);
+			pthread_mutex_lock(&pipe.mu);
+			{
+				uint32_t nh = 0;
+				for (k = 0; k < nseg; ++k)
+					if (seg[k].html)
+						slim_idx[nh++] = k;
+				pipe.slim_idx = slim_idx;
+				pipe.seg = seg;
+				pipe.slim_next = 0;
+				pipe.slim_done = 0;
+				pipe.slim_total = nh;
+			}
+			pthread_cond_broadcast(&pipe.work);
+			while (pipe.slim_done < pipe.slim_total) {
+				WRITE_DONE();
+				if (pipe.slim_done < pipe.slim_total)
+					pthread_cond_wait(&pipe.progress, &pipe.mu);
+			}
+			pipe.slim_total = 0;
+			pthread_mutex_unlock(&pipe.mu);
+			t_wait_slim += time(NULL) - t0;
+			/* pack: blobs in reading order, so each cluster holds
+			 * neighbouring entries */
+			{
+				uint32_t *order = malloc(sizeof(uint32_t) * (nseg ? nseg : 1));
+				uint32_t *b_cluster = malloc(sizeof(uint32_t) * (nseg ? nseg : 1));
+				uint32_t *b_index = malloc(sizeof(uint32_t) * (nseg ? nseg : 1));
+				uint32_t no = 0, r2;
+				uint8_t *seen = calloc(nseg ? nseg : 1, 1);
+				for (r2 = 0; r2 < i - start; ++r2)
+					if (!seen[ref_blob[r2]]) {
+						seen[ref_blob[r2]] = 1;
+						order[no++] = ref_blob[r2];
+					}
+				free(seen);
+				b = 0;
+				while (b < no) {
+					size_t total = 0, off;
+					uint32_t first = b;
+					nb = 0;
+					while (b < no && (total < target || nb == 0)) {
+						b_cluster[order[b]] = cluster_id;
+						b_index[order[b]] = nb++;
+						total += seg[order[b]].len;
+						b++;
+					}
+					raw_len = 4 * (size_t)(nb + 1) + total;
+					raw = malloc(raw_len);
+					off = 4 * (size_t)(nb + 1);
+					for (k = 0; k < nb; ++k) {
+						sblob_t *sb = &seg[order[first + k]];
+						zw_wr32(raw + 4 * k, (uint32_t)off);
+						memcpy(raw + off, sb->data, sb->len);
+						off += sb->len;
+						free(sb->data);
+					}
+					zw_wr32(raw + 4 * nb, (uint32_t)off);
+					SUBMIT(raw, raw_len);
+					raw = NULL;
+					cluster_id++;
+				}
+				for (r2 = 0; r2 < i - start; ++r2) {
+					new_cluster[refs[start + r2].entry] = b_cluster[ref_blob[r2]];
+					new_blob[refs[start + r2].entry] = b_index[ref_blob[r2]];
+				}
+				free(order);
+				free(b_cluster);
+				free(b_index);
+			}
+			progress("reclustering", i, nrefs);
 		}
-		/* cluster body: offsets (n+1) then the blobs */
-		raw_len = 4 * (size_t)(nblobs + 1) + total;
-		raw = malloc(raw_len);
+		if (dropped) {
+			/* one cluster holding a single empty blob for the dropped
+			 * search indexes: still a valid ZIM, just without them */
+			uint32_t e;
+			raw_len = 8;
+			raw = malloc(raw_len);
+			zw_wr32(raw, 8);
+			zw_wr32(raw + 4, 8);
+			for (e = 0; e < z->entry_count; ++e)
+				if (new_cluster[e] == ZIM_NONE - 1) {
+					new_cluster[e] = cluster_id;
+					new_blob[e] = 0;
+				}
+			SUBMIT(raw, raw_len);
+			raw = NULL;
+			cluster_id++;
+		}
+		/* the rest */
 		{
-			uint32_t off = 4 * (nblobs + 1);
-			for (k = 0; k < nblobs; ++k) {
-				zw_wr32(raw + 4 * k, off);
-				memcpy(raw + off, blob_data[k], blob_len[k]);
-				off += blob_len[k];
-				free(blob_data[k]);
+			time_t t0 = time(NULL);
+			pthread_mutex_lock(&pipe.mu);
+			for (;;) {
+				WRITE_DONE();
+				if (pipe.head == pipe.tail)
+					break;
+				pthread_cond_wait(&pipe.progress, &pipe.mu);
 			}
-			zw_wr32(raw + 4 * nblobs, off);
+			pipe.quit = 1;
+			pthread_cond_broadcast(&pipe.work);
+			pthread_mutex_unlock(&pipe.mu);
+			int k3;
+			for (k3 = 0; k3 < threads; ++k3)
+				pthread_join(th[k3], NULL);
+			t_wait_comp += time(NULL) - t0;
 		}
-		if (njobs == cap_jobs) {
-			cap_jobs = cap_jobs ? cap_jobs * 2 : 64;
-			jobs = realloc(jobs, sizeof(job_t) * cap_jobs);
-		}
-		jobs[njobs].raw = raw;
-		jobs[njobs].raw_len = raw_len;
-		njobs++;
-		raw = NULL;
-		if (njobs >= threads * 16)
-			FLUSH_JOBS();
-		progress("reclustering", i, nrefs);
-	}
-	if (dropped) {
-		/* one cluster holding a single empty blob for the dropped
-		 * search indexes: still a valid ZIM, just without them */
-		uint32_t e;
-		raw_len = 8;
-		raw = malloc(raw_len);
-		zw_wr32(raw, 8);
-		zw_wr32(raw + 4, 8);
-		for (e = 0; e < z->entry_count; ++e)
-			if (new_cluster[e] == ZIM_NONE - 1) {
-				new_cluster[e] = nclusters + (uint32_t)njobs;
-				new_blob[e] = 0;
-			}
-		if (njobs == cap_jobs) {
-			cap_jobs = cap_jobs ? cap_jobs * 2 : 64;
-			jobs = realloc(jobs, sizeof(job_t) * cap_jobs);
-		}
-		jobs[njobs].raw = raw;
-		jobs[njobs].raw_len = raw_len;
-		njobs++;
-		raw = NULL;
-	}
-	if (njobs) {
-		size_t big = 0;
-		int t;
-		for (t = 0; t < njobs; ++t)
-			if (jobs[t].raw_len > big)
-				big = jobs[t].raw_len;
-		if (big > BIG_CLUSTER / 4)
-			fprintf(stderr, "\nfinishing the last batch (largest cluster %zu MB)...\n", big >> 20);
-		FLUSH_JOBS();
+		free(seg);
+		free(ref_blob);
+		free(slim_idx);
+		free(pipe.ring);
 	}
 	progress("reclustering", nrefs, nrefs);
 	stage_done("reclustering");
+	fprintf(stderr, "  (reading the input %ld min %02ld s; waiting for slimming %ld min %02ld s, "
+		"for compression %ld min %02ld s)\n",
+		(long)(t_read / 60), (long)(t_read % 60), (long)(t_wait_slim / 60), (long)(t_wait_slim % 60),
+		(long)(t_wait_comp / 60), (long)(t_wait_comp % 60));
+	if (slim && pipe.slim_before)
+		fprintf(stderr, "slimmed the HTML from %.1f to %.1f %s (%.0f%% smaller)\n",
+			pipe.slim_before / (pipe.slim_before >= 10e9 ? 1e9 : 1e6),
+			pipe.slim_after / (pipe.slim_before >= 10e9 ? 1e9 : 1e6),
+			pipe.slim_before >= 10e9 ? "GB" : "MB",
+			100.0 - 100.0 * (double)pipe.slim_after / (double)pipe.slim_before);
 	if (dropped)
 		fprintf(stderr, "left out %u full text search index entr%s (not used by the WikiReader)\n",
 			dropped, dropped == 1 ? "y" : "ies");
 	if (npics || npicredir)
-		fprintf(stderr, "left out %u picture%s and %u redirect%s to them (the WikiReader shows no pictures; --keep-images keeps them)\n",
+		fprintf(stderr, "left out the original pictures from the .Z files: %u picture%s and %u redirect%s to them "
+			"(the WikiReader cannot use them; --pictures makes its own black and white copies, in the .P files)\n",
 			npics, npics == 1 ? "" : "s", npicredir, npicredir == 1 ? "" : "s");
-	(void)raw_cap;
 
 	/* 3. assemble: header, MIME list, pointer lists, dirents,
 	 * cluster pointers, clusters, checksum */
@@ -835,8 +993,5 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 	free(new_blob);
 	free(refs);
 	free(cluster_off);
-	free(jobs);
-	free(blob_len);
-	free(blob_data);
 	return 0;
 }

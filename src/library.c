@@ -239,14 +239,29 @@ static void ext_name(const library_t *L, char *out)
 	lib_path(&L->info, ".EXT", out);	/* next to the wiki's own files */
 }
 
+/* the first part of the file map holds it all unless the wiki's files
+ * are in many pieces on the card: read only that much at first */
+#define EXT_FIRST (64u * 1024u)
+
 static void load_extents(library_t *L)
 {
 	char name[32];
 	uint8_t *data;
-	uint32_t len, off = 8, i, n;
+	uint32_t len, off = 8, i, n, need = 8;
 	ext_name(L, name);
-	if (plat_load(name, &data, &len) < 0)
+	if (plat_load_max(name, EXT_FIRST, &data, &len) < 0)
 		return;
+	if (len == EXT_FIRST && len >= 8 && zw_rd32(data) == EXT_MAGIC) {
+		/* does it go on past what was read? */
+		n = zw_rd32(data + 4);
+		for (i = 0; i < n && need + 16 <= len; ++i)
+			need += 16 + zw_rd32(data + need + 12);
+		if (i < n || need > len) {
+			zw_free(data);
+			if (plat_load(name, &data, &len) < 0)
+				return;
+		}
+	}
 	if (len < 8 || zw_rd32(data) != EXT_MAGIC ||
 	    (n = zw_rd32(data + 4)) != L->nchunks + L->npchunks)
 		goto done;

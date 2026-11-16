@@ -36,7 +36,8 @@ Using it
 --------
 SEARCH          search screen, as you left it (press again to clear)
 HISTORY         short press: Back.  Hold: list of recent articles
-RANDOM          random article
+RANDOM          random article.  Hold: calculator (simple and
+                scientific; RANDOM again goes back to the article)
 Type            results update as you type, tap one to open it
                 (drag the results to put the keyboard away, tap the
                 search bar to bring it back; 123 for digits)
@@ -50,6 +51,9 @@ Footnotes, Citations
                 off; used from the next article). On: [a] and [1] markers
                 in the text and the Notes and References lists at the
                 end. Tap a marker to jump to its note, ^ to jump back
+Large text      switch on the empty search screen: bigger text
+Pictures        switch on the empty search screen, for wikis made with
+                pictures: shows or hides them, keeping your place
 Power           saves your place and switches off (also after 2 minutes)
 
 Adding other wikis
@@ -57,7 +61,9 @@ Adding other wikis
 Any Kiwix ZIM can be added (Wikipedia, Wiktionary, Wikivoyage...), up to
 32 wikis per card. Always prepare it on a PC with zimprep (in the source
 package) and copy the folder it makes to the card. Do not copy .zim files
-to the card directly. Full instructions are in the README.md inside the
+to the card directly. For pictures, start from a "maxi" ZIM and add
+--pictures lead (the first picture of each article) or --pictures all;
+--add-pictures adds them to a wiki you already made. Full instructions are in the README.md inside the
 source package.
 
 Problems

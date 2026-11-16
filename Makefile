@@ -24,7 +24,7 @@ APP   := src/app.c src/library.c src/blockdev.c src/fat.c src/html.c \
 obj = $(patsubst %.c,$(BUILD)/%.o,$(1))
 
 TOOLS := $(BUILD)/zimprep $(BUILD)/zimcat
-TESTS := $(BUILD)/idxtest $(BUILD)/fattest $(BUILD)/textest $(BUILD)/calctest
+TESTS := $(BUILD)/idxtest $(BUILD)/fattest $(BUILD)/textest $(BUILD)/calctest $(BUILD)/slimcheck
 SIMS  := $(BUILD)/zimwiki-headless
 ifneq ($(SDL_LIBS),)
 SIMS  += $(BUILD)/zimwiki-sdl
@@ -76,7 +76,10 @@ wikifont: tools/mkwikifont.py tools/bdf2c.py fonts/bdf/textall.bdf
 src/fold_table.h: tools/mkfold.py
 	python3 tools/mkfold.py > $@
 
-$(BUILD)/zimprep: $(call obj,tools/zimprep.c tools/recluster.c tools/pictures.c $(CORE) $(THIRD) host/hostio.c)
+$(BUILD)/slimcheck: $(call obj,tests/slimcheck.c tools/slim.c src/html.c src/tex.c src/font.c src/gfx.c fonts/fonts.c host/plat_common.c $(CORE) $(THIRD) host/hostio.c)
+	$(CC) -o $@ $^ -lz
+
+$(BUILD)/zimprep: $(call obj,tools/zimprep.c tools/recluster.c tools/pictures.c tools/slim.c $(CORE) $(THIRD) host/hostio.c)
 	$(CC) -o $@ $^ -lzstd -lpthread $(WEBP_LIBS) -lm
 
 $(BUILD)/zimcat: $(call obj,tools/zimcat.c $(CORE) $(THIRD) host/hostio.c)

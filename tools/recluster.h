@@ -1,5 +1,6 @@
 #ifndef RECLUSTER_H
 #define RECLUSTER_H
+#include <time.h>
 #include "../src/zim.h"
 /* write z with ~target_kb KiB clusters to base.Z00, base.Z01, ...
  * Unless keep_images, pictures (image/... entries) and redirects to them
@@ -11,7 +12,9 @@
  * -> new (ZIM_NONE: left out), malloc'd; NULL when nothing is left out.
  * *out_entries: the new entry count */
 uint32_t *image_map(zim_t *z, uint32_t *out_entries, uint32_t *out_pics, uint32_t *out_redirs);
+/* when zimprep started (for the running total), 0: not set */
+extern time_t zimprep_start;
 int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, int level,
-	      int threads, int keep_fulltext, int keep_images, uint32_t **out_map,
+	      int threads, int keep_fulltext, int keep_images, int slim, uint32_t **out_map,
 	      uint32_t *out_entries, uint64_t *out_size, uint32_t *out_chunks);
 #endif

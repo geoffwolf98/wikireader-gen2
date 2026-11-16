@@ -6,15 +6,22 @@
  *   -n NAME       base name on the card, 1-8 letters/digits (default WIKI)
  *   --chunk-mb N  chunk size in MiB, power of two, max 2048 (default 2048)
  *   --index-only  write NAME.IDX only (chunks already on the card)
- *   --recluster [KB]  rewrite the ZIM with small clusters (default 128 KiB)
+ *   --recluster [KB]  rewrite the ZIM with small clusters (default 64 KiB,
+ *                 128 KiB with --no-slim)
  *                 so the WikiReader decompresses far less per article
  *   --level N     zstd level for --recluster (default 19)
- *   --threads N   compression threads for --recluster (default: all CPUs)
+ *   --threads N   threads for reclustering and pictures (default: all CPUs)
  *   --keep-fulltext  keep Kiwix's Xapian search indexes when reclustering
  *                 (left out by default: large, slow, unused on the device)
  *   --pictures lead|all  also make NAME.P00... with the articles' pictures
  *                 as 1-bit bitmaps for the WikiReader: the first picture
  *                 of each article, or all of them (default: none)
+ *   --no-slim     keep the articles' HTML as it is (by default it is
+ *                 slimmed to what the WikiReader reads: a third or less of
+ *                 the size, quicker to open; the pages then look plain in
+ *                 Kiwix)
+ *   --dither fs   Floyd-Steinberg dithering for pictures (default Atkinson:
+ *                 crisper, smaller; fs keeps pale shading)
  *   --add-pictures lead|all  add NAME.P00... to a wiki already prepared
  *                 in OUTDIR from this INPUT (no reclustering again)
  *   (--keep-images, not listed: keep the original pictures inside the
@@ -308,10 +315,10 @@ static void write_chunks(host_files_t *in, const char *dir, const char *name,
  * its FAT code search the whole FAT for free space, which takes long
  * enough to freeze or reset the unit, so they are made here, empty (the
  * device reads zeros as "nothing saved yet") and big enough that the
- * device only ever overwrites them. */
-#define PLACEHOLDER_SIZE (64 * 1024)
-
-static void placeholder(const char *dir, const char *name, const char *ext)
+ * device only ever overwrites them.  The file map gets 256 KB: room for
+ * about 21,000 runs of clusters, so even a wiki copied onto a badly
+ * fragmented card has its map saved (64 KB held about 5,400). */
+static void placeholder(const char *dir, const char *name, const char *ext, int kb)
 {
 	char path[4096];
 	FILE *f;
@@ -324,7 +331,7 @@ static void placeholder(const char *dir, const char *name, const char *ext)
 	}
 	if (!(f = fopen(path, "wb")))
 		return;
-	for (i = 0; i < PLACEHOLDER_SIZE / (int)sizeof(zero); ++i)
+	for (i = 0; i < kb * 1024 / (int)sizeof(zero); ++i)
 		fwrite(zero, 1, sizeof(zero), f);
 	fclose(f);
 }
@@ -343,8 +350,8 @@ static void remove_pictures(const char *outdir, const char *upname)
 /* --add-pictures: the wiki in outdir must be this ZIM prepared by
  * zimprep; its renumbering is worked out again (a quick pass) and
  * checked against it before the pictures are made */
-static int add_pictures_to(zim_t *z, const char *outdir, const char *upname, int mode, int threads,
-			   uint32_t shift)
+static int add_pictures_to(zim_t *z, const char *input, const char *outdir, const char *upname, int mode,
+			   int threads, uint32_t shift)
 {
 	host_files_t pf;
 	zim_t old;
@@ -387,19 +394,21 @@ static int add_pictures_to(zim_t *z, const char *outdir, const char *upname, int
 	fprintf(stderr, "%u entries match\n", checked);
 	zim_close(&old);
 	host_files_close(&pf);
-	if (make_pictures(z, outdir, upname, mode, threads, map, n, shift) < 0)
+	if (make_pictures(z, input, outdir, upname, mode, threads, map, n, shift) < 0)
 		return 1;
 	free(map);
 	fprintf(stderr, "done: copy %s.P* to the SD card, next to the wiki's other files\n", base);
 	return 0;
 }
 
+time_t zimprep_start;
+
 int main(int argc, char **argv)
 {
 	const char *name = "WIKI", *input = NULL, *outdir = NULL;
 	uint32_t chunk_mb = 2048, shift, chunks, i;
 	int index_only = 0, a, r, level = 19, threads = 0, keep_fulltext = 0, keep_images = 0;
-	int pictures = 0, add_pictures = 0;
+	int pictures = 0, add_pictures = 0, slim = 1;
 	uint32_t recluster_kb = 0, prep_entries = 0;
 	host_files_t in;
 	zim_t z;
@@ -416,13 +425,24 @@ int main(int argc, char **argv)
 		else if (strcmp(argv[a], "--index-only") == 0)
 			index_only = 1;
 		else if (strcmp(argv[a], "--recluster") == 0) {
-			recluster_kb = 128;
+			recluster_kb = 1;	/* the default, settled below */
 			if (a + 1 < argc && atoi(argv[a + 1]) > 0)
 				recluster_kb = (uint32_t)atoi(argv[++a]);
 		} else if (strcmp(argv[a], "--level") == 0 && a + 1 < argc)
 			level = atoi(argv[++a]);
 		else if (strcmp(argv[a], "--keep-fulltext") == 0)
 			keep_fulltext = 1;
+		else if (strcmp(argv[a], "--no-slim") == 0)
+			slim = 0;
+		else if (strcmp(argv[a], "--dither") == 0 && a + 1 < argc) {
+			a++;
+			if (!strcmp(argv[a], "atkinson"))
+				pic_dither = PIC_DITHER_ATKINSON;
+			else if (!strcmp(argv[a], "fs"))
+				pic_dither = PIC_DITHER_FS;
+			else
+				die("--dither fs or atkinson, not %s", argv[a]);
+		}
 		else if (strcmp(argv[a], "--keep-images") == 0)
 			keep_images = 1;
 		else if ((strcmp(argv[a], "--pictures") == 0 || strcmp(argv[a], "--add-pictures") == 0) &&
@@ -457,12 +477,19 @@ int main(int argc, char **argv)
 	}
 	if (!input || !outdir) {
 		fprintf(stderr, "usage: zimprep [-n NAME] [--chunk-mb N] [--index-only] [--recluster [KB]] [--level N]\n"
-			"               [--threads N] [--keep-fulltext] [--pictures lead|all] INPUT.zim OUTDIR\n"
+			"               [--threads N] [--keep-fulltext] [--no-slim] [--pictures lead|all] [--dither fs]\n"
+			"               INPUT.zim OUTDIR\n"
 			"       zimprep [-n NAME] --add-pictures lead|all INPUT.zim OUTDIR\n"
 			"               (adds pictures to the wiki made from INPUT.zim in OUTDIR)\n"
 			"       zimprep --version\n");
 		return 2;
 	}
+	/* default cluster size: slimmed HTML packs about three times the
+	 * articles into a cluster, so 64 KiB holds about what 128 KiB did:
+	 * short articles open faster than unslimmed ones (and much faster
+	 * long ones), for a slightly bigger wiki than 128 KiB would give */
+	if (recluster_kb == 1)
+		recluster_kb = slim ? 64 : 128;
 	if (keep_images && pictures)
 		die("%s", "--keep-images would also keep the original pictures in the .Z files, which the "
 		    "WikiReader cannot show (they only take space): leave it out");
@@ -482,16 +509,41 @@ int main(int argc, char **argv)
 		die("chunk size must be a power of two MiB up to 2048", "");
 
 	zw_log_enabled = 0;
+	zimprep_start = time(NULL);
 	if ((r = host_files_open(&in, input)) < 0)
 		die("cannot open %s", input);
 	if ((r = zim_open(&z, &in.io)) < 0)
 		die("%s is not a ZIM file this tool understands", input);
+	/* before anything branches off (--add-pictures once ran on one
+	 * thread because this came later) */
+	if (threads <= 0)
+		threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
+	if (threads < 1)
+		threads = 1;
+	if (threads > 64)
+		threads = 64;
 	if (add_pictures)
-		return add_pictures_to(&z, outdir, upname, pictures, threads, shift);
+		return add_pictures_to(&z, input, outdir, upname, pictures, threads, shift);
 	chunks = (uint32_t)((in.io.size + ((uint64_t)1 << shift) - 1) >> shift);
 	if (chunks > 100)
 		die("too many chunks; use a bigger --chunk-mb", "");
-	mkdir(outdir, 0777);
+	/* the output folder and any missing folders above it, checked now
+	 * rather than after the title list */
+	{
+		char p[4096];
+		size_t k;
+		struct stat st;
+		snprintf(p, sizeof(p), "%s", outdir);
+		for (k = 1; p[k]; ++k)
+			if (p[k] == '/') {
+				p[k] = 0;
+				mkdir(p, 0777);
+				p[k] = '/';
+			}
+		mkdir(p, 0777);
+		if (stat(outdir, &st) != 0 || !S_ISDIR(st.st_mode))
+			die("cannot make the folder %s", outdir);
+	}
 
 	fprintf(stderr, "%s: %u entries, namespace %c, %u chunk(s) of %u MiB\n",
 		input, z.entry_count, z.content_ns, chunks, chunk_mb);
@@ -516,12 +568,6 @@ int main(int argc, char **argv)
 	fprintf(stderr, "sorting %zu titles\n", nrec);
 	qsort(recs, nrec, sizeof(rec_t), rec_cmp);
 
-	if (threads <= 0)
-		threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
-	if (threads < 1)
-		threads = 1;
-	if (threads > 64)
-		threads = 64;
 	if (recluster_kb && !index_only) {
 		uint64_t size;
 		char base[4096];
@@ -529,7 +575,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "reclustering to %u KiB clusters, zstd level %d, %d threads\n",
 			recluster_kb, level, threads);
 		recluster(&z, base, shift, recluster_kb, level, threads, keep_fulltext, keep_images,
-			  &g_map, &g_entries, &size, &chunks);
+			  slim, &g_map, &g_entries, &size, &chunks);
 		snprintf(path, sizeof(path), "%s/%s.IDX", outdir, upname);
 		write_index(&z, path, upname, chunks, shift, size);
 	} else {
@@ -542,10 +588,10 @@ int main(int argc, char **argv)
 	if (!index_only && !pictures)
 		remove_pictures(outdir, upname);	/* an older run's: wrong numbering now */
 	if (pictures && !index_only &&
-	    make_pictures(&z, outdir, upname, pictures, threads, g_map, prep_entries, shift) < 0)
+	    make_pictures(&z, input, outdir, upname, pictures, threads, g_map, prep_entries, shift) < 0)
 		return 1;
-	placeholder(outdir, upname, ".HIS");
-	placeholder(outdir, upname, ".EXT");
+	placeholder(outdir, upname, ".HIS", 64);
+	placeholder(outdir, upname, ".EXT", 256);
 	zim_close(&z);
 	host_files_close(&in);
 	fprintf(stderr, "done: copy %s/%s.* to the SD card (top folder or a folder of its own)\n", outdir, upname);

@@ -1,6 +1,6 @@
 # zimwiki: ZIM reader firmware for the Openmoko WikiReader
 
-Version 1.0.46 (released as *WikiReader Gen2*). The version and build date
+Version 1.0.49 (released as *WikiReader Gen2*). The version and build date
 are shown at the bottom of the search screen; `zimprep --version` prints
 it for the PC tool.
 
@@ -39,7 +39,8 @@ Contents:
 * **Fast**: about 0.4 to 0.5 s to open an article of a *mini* wiki
   (introductions only; measured in the emulator). Full length articles
   (*maxi* and *nopic* wikis) take seconds, most for reading the long
-  HTML; a progress bar on big pages. Scrolling is 1:1 with
+  HTML, which zimprep slims to a third or so (1.0.47); a progress bar on
+  big pages. Scrolling is 1:1 with
   momentum.
 * **Navigation like a browser**: HISTORY (short press) or the bottom left
   corner goes Back; the toolbar has *Back*, *List* (jump to a section by
@@ -146,31 +147,53 @@ build/host/zimprep -n MATHS --recluster ~/zims/wikipedia_en_mathematics_nopic_20
 This writes `MATHS.IDX` (the search index) and `MATHS.Z00`, `MATHS.Z01`...
 (the ZIM in 2 GB pieces, because FAT32 cannot hold files over 4 GB).
 
-* `--recluster` rewrites the ZIM with small (128 KB) compressed clusters.
+* `--recluster` rewrites the ZIM with small (64 KB; 128 KB with
+  `--no-slim`) compressed clusters.
   It is still a normal ZIM (same entries, same UUID, checked with libzim),
-  but the WikiReader then decompresses about 64 KB per article instead of
-  about 1 MB, which is most of the time it takes to open a page. It uses
+  but the WikiReader then decompresses a few tens of KB per article
+  instead of about 1 MB, which is most of the time it takes to open a
+  page. It uses
   all CPU cores. Kiwix's full text search indexes (Xapian, often several
   GB) are left out, as the WikiReader has its own title index;
   `--keep-fulltext` keeps them. So are the pictures (and redirects to
   them), which the WikiReader cannot show: the remaining entries are
   renumbered, and the ZIM's lists and the WikiReader's index with them.
+  Each article's HTML is also **slimmed** to what the WikiReader reads
+  (its tags and the few attributes and class names it uses; no styles,
+  scripts, MathML or hidden boxes): about a third of the size, so the
+  wiki is smaller and articles open quicker (emulated: a 494 KB article's
+  first screen in 0.63 s instead of 2.64 s; short articles 16% quicker,
+  and the climate test wiki 23% smaller). Every article shows exactly
+  as before (`build/host/slimcheck --pair INPUT.zim PREPARED.zim`, with
+  the `.Z` pieces joined, checks a whole wiki). Kiwix on a PC would show
+  the pages plain; `--no-slim` keeps the HTML as it is.
   Without `--recluster` the ZIM is only
   split (minutes instead of hours, but slower page opening), pictures
   and all.
-* Time: minutes for the small wikis; one to a few hours for the full
-  English Wikipedia (it prints the time of each stage).
+* Time: minutes for the small wikis; a few hours for the full English
+  Wikipedia (it prints the time of each stage, and how long it waited on
+  reading and on compressing). Reading, slimming and compressing run at
+  the same time on all cores, and so does the picture search.
+* Figures, English Wikipedia maxi 2026-08 (127.4 GB, 30.1 million
+  entries, 32 threads): the text step (`--recluster`, 1.0.47) took 39 min
+  and made 29.6 GB of ZIM pieces (HTML slimmed from 531.6 to 145.6 GB);
+  `--pictures all` made 19.5 GB with 1.0.46 (7.15 million pictures in
+  4.66 million articles; Atkinson dithering makes about 8% less). So
+  about 48 GB in all: a 64 GB card. Without slimming (1.0.46) the ZIM
+  pieces were 74.0 GB and the text step 1 h 50 min.
 * `--pictures lead` or `--pictures all` (needs a *maxi* ZIM, and zimprep
   built with libwebp-dev installed) also writes `NAME.P00`, `NAME.P01`...:
-  the article pictures turned into black and white bitmaps (dithered, at
-  most 228 x 200 pixels) that the WikiReader shows in the text where they
+  the article pictures turned into black and white bitmaps (Atkinson
+  dithering, at most 228 x 200 pixels; `--dither fs` for the softer
+  Floyd-Steinberg of 1.0.43 to 1.0.47, which keeps pale shading but
+  leaves more stray dots) that the WikiReader shows in the text where they
   were. `lead` keeps each article's first picture (usually the infobox
   one), `all` up to 32 per article. Icons, maths formulas (shown as text
   already), SVG drawings and pictures under 24 pixels are left out; a
   picture used in many articles is stored once, each one compressed
-  (about a third smaller for photos). A picture takes about 3 KB (at most
-  5.7 KB); for scale, a 2022 English Wikipedia maxi made 21.3 GB of
-  picture files before compression was added, so expect about 14 GB.
+  (about a quarter smaller). A picture takes about 2.7 KB (at most
+  5.7 KB): `all` made 19.5 GB for the 2026 English Wikipedia (see
+  below), `lead` is a fraction of that.
   Conversion uses all CPU cores and adds to the time. The default is
   `none`. Never add `--keep-images` (an old option, no longer listed): it
   keeps the original pictures inside the `.Z` files too, which the
@@ -184,8 +207,12 @@ This writes `MATHS.IDX` (the search index) and `MATHS.Z00`, `MATHS.Z01`...
   those to the card next to the wiki's other files. It still reads every
   article and converts the pictures, but skips the hours of compressing.
   Running it again with the other mode replaces the picture files.
-* Other options: `--chunk-mb N`, `--level N` (zstd level, default 19),
-  `--threads N`, `--index-only` (rebuild just the index).
+* Other options: `--chunk-mb N`, `--level N` (zstd level, default 19:
+  higher levels gain nothing with small clusters), `--threads N`,
+  `--index-only` (rebuild just the index), `--no-slim`.
+* Two stages work too: `--recluster` first (a complete wiki without
+  pictures), `--add-pictures lead|all` any time later with the same ZIM
+  file.
 
 Suggested names:
 
@@ -258,8 +285,9 @@ Notes:
 * **Folders**: wikis go in the top folder or one folder down, not deeper.
   Each wiki's history and file map (`NAME.HIS`, `NAME.EXT`) live next to
   its files, and `ZWSTATE.DAT` (last wiki and position) in the top folder.
-  **Copy them to the card too**: zimprep makes the first two (64 KB of
-  zeros) and `card/ZWSTATE.DAT` is the third. The WikiReader can only
+  **Copy them to the card too**: zimprep makes the first two (64 KB and,
+  from 1.0.47, 256 KB of zeros: room for the map of a wiki copied onto a
+  fragmented card) and `card/ZWSTATE.DAT` is the third. The WikiReader can only
   create files slowly on a nearly full card (its FAT code searches the
   whole card for free space, long enough to freeze or reset the unit), so
   it should only ever overwrite them. For a wiki prepared with an older
@@ -473,6 +501,9 @@ now and then, or grifo's watchdog resets the unit after 20 s.
 * 1.0.44: Picture captions: the caption under a picture (figure, thumbnail, gallery and infobox captions) is shown in small text, centred under the picture, and goes with it when Pictures is off. 1.0.43 hid them (its notes said otherwise). Device only: wikis made with 1.0.43's zimprep get them as they are.
 * 1.0.45: Scrolling over pictures no longer stalls or overshoots. Reading a picture from the card held up the page while the finger was moving, and the movement made during the wait arrived as one jump that was taken as a fast flick, so the page flew on after the finger lifted. Now a picture not read yet is drawn as a frame while the finger is down or the page is gliding, and read once it stops; and a flick that spans any hold-up (more than 50 ms) is not turned into a glide. Pictures are also read further ahead (4 strips, 256 rows, below the screen) while nothing is happening. Tests: swiping a long page with a slow card (ZW_SECTOR_US) and a fling after a slow frame (new script commands move and slowdraw). Device only.
 * 1.0.46: Picture files about a third smaller: each bitmap is compressed on its own (zstd) and unpacked as it is read, adding about 10 ms per picture on the device (picture file format version 2; version 1 files from 1.0.43 to 1.0.45 still work). `zimprep --add-pictures lead|all` adds pictures to a wiki already made, checking it was made from the same ZIM with the same numbering, without reclustering again. `--keep-images` is no longer listed and is refused with `--pictures`: together they stored every picture twice (the originals in the .Z files, which the WikiReader cannot show, and the bitmaps), e.g. 103 GB instead of about 59 GB for a 2022 English Wikipedia. Version 2 picture files record which build they belong to, so pictures from another build of the same ZIM (different numbering) are ignored instead of showing wrong pictures; a run without pictures deletes an older run's picture files. Both init.app and zimprep changed.
+* 1.0.47: zimprep slims each article's HTML to what the WikiReader reads (63% less HTML on the climate test wiki; with clusters of 64 KiB, the new default when slimming, the ZIM pieces are 23% smaller and short articles open 16% quicker, and a 494 KB article's first screen takes 0.63 s instead of 2.64 s, emulated; `--no-slim` keeps the HTML and 128 KiB), checked by a new tool, `slimcheck`, that converts every article both ways with the device's own converter, with each setting of Footnotes, Citations and Pictures, and compares the results (no differences on the test wikis, nor on a test ZIM of awkward HTML: {{Y}}/{{N}} ticks, pre, maths, notes, picture boxes, odd markup). Reclustering is now a pipeline: reading, slimming and compressing overlap instead of taking turns, and it prints how long it waited on each. The picture search runs on all threads (the full English Wikipedia took 71 minutes on one), each reading its block of articles in cluster order; the output is the same on any number of threads. The running total time carries on through the picture stages, and the message about leaving out pictures no longer says the WikiReader shows none. zimprep makes NAME.EXT 256 KB (room for about 21,000 runs instead of 5,400), so a wiki copied onto a fragmented card does not prepare at every start; the device reads only its first 64 KB unless the map is longer. Tested with a fragmented card image.
+* 1.0.48: Pictures use Atkinson dithering: cleaner maps and diagrams (white stays white), clearer shapes in photos, and 8 to 11% smaller picture files; it loses some pale shading, so `--dither fs` keeps the old Floyd-Steinberg. Re-run `--add-pictures` to convert a wiki's pictures again. zimprep makes any missing folders in OUTDIR (like mkdir -p) and checks it before reading the ZIM, instead of failing after the title list. slimcheck shows its progress. The card's README.txt covers the calculator, Large text and Pictures. Releases now come as one zip for the card (kernel.elf, init.app, WIKIFONT.BIN, ZWSTATE.DAT, README.txt and the source) plus the source tarball.
+* 1.0.49: `--add-pictures` ran on one thread unless given `--threads` (the default, all CPUs, was worked out after it branched off); it now uses all CPUs and says how many. The slimming line prints GB for big wikis. Figures from the full English Wikipedia (2026-08 maxi, 32 threads, 1.0.47): reclustering 37 min (was 107), the whole text step 39 min (was 1 h 50), HTML 531.6 GB slimmed to 145.6 GB, ZIM pieces 29.6 GB (were 74.0).
 * 1.0.13: saves write only the data (a few KB) over the existing file instead of rewriting all 64 KB: quicker and much less writing to the card.
 * 1.0.12: the device never grows or recreates a save file (a cut-off save left an empty file that froze the next save); a failed save is not retried in a loop (that kept the unit awake); device logging no longer uses the unreliable printf.
 * 1.0.11: zimprep makes each wiki's NAME.HIS and NAME.EXT in advance, and the release has an empty ZWSTATE.DAT: creating files on a nearly full card made the WikiReader freeze or go blank (its FAT code searches the whole card for free space).

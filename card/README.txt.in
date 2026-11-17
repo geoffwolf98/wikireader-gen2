@@ -68,6 +68,9 @@ source package.
 
 Problems
 --------
+* It crashes or freezes every time it starts (it reopens the last page):
+  hold SEARCH while switching on, until "Safe mode" appears. That forgets
+  the last page and the settings (history is kept).
 * The WikiReader shows its contrast menu, as if there were no card: some
   microSD cards are not recognised by the WikiReader's built-in loader.
   Try a different make of card.

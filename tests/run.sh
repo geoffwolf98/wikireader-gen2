@@ -542,6 +542,19 @@ EOF2
 	$B/zimwiki-headless "$P/card.img" "$P/fling1.txt" "$P/state" > "$P/fling.log" 2>&1 &&
 	{ rm -rf "$P/state"; $B/zimwiki-headless "$P/card.img" "$P/fling2.txt" "$P/state" >> "$P/fling.log" 2>&1; } \
 		&& ok "no fling after a stall (overscroll)" || { bad "no fling after a stall (overscroll)"; grep FAIL "$P/fling.log"; }
+	# safe mode: SEARCH held at power on forgets the page it would reopen
+	# (and the settings), ignores that SEARCH press, keeps working after
+	printf 'type cattle\ntap 60 30\nexpect pics=2\nwait 3000\n' > "$P/sm1.txt"
+	printf 'expect "Safe mode"\nbutton search\nexpect "Safe mode"\ntap 120 100\nexpect search ""\n' > "$P/sm2.txt"
+	printf 'expect search ""\n' > "$P/sm3.txt"
+	for R in "$B/zimwiki-headless" "build/c33emu device/build/init.elf"; do
+		[ -x "${R%% *}" ] || continue
+		rm -rf "$P/sms"
+		$R "$P/card.img" "$P/sm1.txt" "$P/sms" > "$P/sm.log" 2>&1 &&
+		ZW_HELD=search $R "$P/card.img" "$P/sm2.txt" "$P/sms" >> "$P/sm.log" 2>&1 &&
+		$R "$P/card.img" "$P/sm3.txt" "$P/sms" >> "$P/sm.log" 2>&1 \
+			&& ok "safe mode ($(basename "${R%% *}"))" || { bad "safe mode ($(basename "${R%% *}"))"; grep FAIL "$P/sm.log"; }
+	done
 	# pictures made from another ZIM are not used
 	mkdir -p "$P/card2/WIKI"
 	cp "$P/none"/WIKI.* "$P/card2/WIKI/"

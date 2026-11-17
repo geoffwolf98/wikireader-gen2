@@ -124,6 +124,22 @@ int plat_save(const char *name, const void *data, uint32_t len)
 
 uint32_t host_present_ms;	/* tests: each frame takes this long */
 
+/* ZW_HELD=search (or history, random): held down at start (safe mode) */
+int plat_buttons_held(void)
+{
+	const char *e = getenv("ZW_HELD");
+	int r = 0;
+	if (!e)
+		return 0;
+	if (strstr(e, "search"))
+		r |= 1 << BTN_SEARCH;
+	if (strstr(e, "history"))
+		r |= 1 << BTN_HISTORY;
+	if (strstr(e, "random"))
+		r |= 1 << BTN_RANDOM;
+	return r;
+}
+
 void plat_present(const uint8_t *fb)
 {
 	memcpy(host_fb, fb, sizeof(host_fb));

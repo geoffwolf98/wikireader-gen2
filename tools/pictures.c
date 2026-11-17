@@ -872,7 +872,6 @@ long make_pictures(zim_t *z, const char *input, const char *outdir, const char *
 			pthread_join(th[t], NULL);
 		free(sc.res);
 	}
-	progress("finding pictures", z->entry_count, z->entry_count);
 	stage_done("finding pictures");
 	fprintf(stderr, "%u articles with pictures, %u pictures to convert\n", narts, nimgs);
 	if (!narts)

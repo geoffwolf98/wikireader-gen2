@@ -125,6 +125,8 @@ static struct app {
 	char msg[6][64];
 	int nmsg;
 	int msg_return;		/* screen to go to on tap, -1 = none */
+	uint32_t safe_ms;	/* safe mode: when; its SEARCH release is ignored */
+	uint8_t safe_swallow;
 
 	uint32_t last_input;
 	int hist_down;		/* HISTORY pressed, not yet resolved */
@@ -2832,6 +2834,17 @@ void app_event(const void *ev)
 {
 	const plat_event_t *e = ev;
 	A.last_input = plat_ms();
+	/* safe mode: the SEARCH that was held at power on (grifo reports it
+	 * as a press) must not dismiss the message or start anything */
+	if (A.safe_swallow && e->code == BTN_SEARCH &&
+	    (e->type == PE_BUTTON_DOWN || e->type == PE_BUTTON_UP)) {
+		if (plat_ms() - A.safe_ms < 15000) {
+			if (e->type == PE_BUTTON_UP)
+				A.safe_swallow = 0;
+			return;
+		}
+		A.safe_swallow = 0;
+	}
 	switch (e->type) {
 	case PE_TOUCH_DOWN:
 		touch_down(e->x, e->y);
@@ -3095,12 +3108,46 @@ void app_settle(void)
 /* ------------------------------------------------------------------ */
 /* start up */
 
+/* safe mode, SEARCH held at power on: for when the saved state (the page
+ * it reopens, a setting) or a wiki's file map makes it crash at start.
+ * Forgets the state, makes the file maps again, keeps the history */
+static void safe_mode(void)
+{
+	static const char *const lines[] = {
+		"The last page and the settings",
+		"are cleared, and the wiki's",
+		"file map is made again.",
+		"History is kept.",
+		"",
+		"Tap to carry on.",
+		NULL
+	};
+	uint8_t zero[214];
+	memset(zero, 0, sizeof(zero));
+	plat_save("ZWSTATE.DAT", zero, sizeof(zero));
+	lib_ignore_maps = 1;
+	A.safe_swallow = 1;
+	A.safe_ms = plat_ms();
+	if (A.nlibs == 1 && open_library(0) == 0) {
+		A.screen = S_SEARCH;
+		A.kb_visible = 1;
+		set_message("Safe mode", lines, S_SEARCH);
+	} else {
+		set_message("Safe mode", lines, A.nlibs > 1 ? S_LIBRARY : S_SEARCH);
+	}
+	lib_ignore_maps = 0;	/* only for this start */
+}
+
 static void restore_state(void)
 {
 	uint8_t *buf;
 	uint32_t len;
 	int i, want = -1;
 	char name[9] = { 0 };
+	if (plat_buttons_held() & (1 << BTN_SEARCH)) {
+		safe_mode();
+		return;
+	}
 	if (plat_load("ZWSTATE.DAT", &buf, &len) == 0) {
 		if (len >= 212 && zw_rd32(buf) == STATE_MAGIC && !memcmp(buf + 200, "CALC", 4)) {
 			double v;

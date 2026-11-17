@@ -63,6 +63,8 @@ int lib_mount(fat_vol_t *v);
 /* path of one of the library's files: "DIR/NAME.EXT" or "NAME.EXT" */
 void lib_path(const lib_info_t *li, const char *ext, char *out);
 int lib_scan(fat_vol_t *v, lib_info_t *out, int max);
+/* safe mode: make the file maps again instead of loading them */
+extern int lib_ignore_maps;
 int lib_open(library_t *L, fat_vol_t *v, const lib_info_t *info);
 void lib_close(library_t *L);
 void lib_save_extents(library_t *L);

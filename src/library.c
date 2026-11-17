@@ -243,12 +243,16 @@ static void ext_name(const library_t *L, char *out)
  * are in many pieces on the card: read only that much at first */
 #define EXT_FIRST (64u * 1024u)
 
+int lib_ignore_maps;
+
 static void load_extents(library_t *L)
 {
 	char name[32];
 	uint8_t *data;
 	uint32_t len, off = 8, i, n, need = 8;
 	ext_name(L, name);
+	if (lib_ignore_maps)
+		return;
 	if (plat_load_max(name, EXT_FIRST, &data, &len) < 0)
 		return;
 	if (len == EXT_FIRST && len >= 8 && zw_rd32(data) == EXT_MAGIC) {

@@ -68,7 +68,28 @@ static uint8_t *ptr(uint32_t a, uint32_t n)
 	fault("bad address", a);
 }
 
-static uint32_t rd8(uint32_t a) { mem_reads++; return *ptr(a, 1); }
+/* port P6 data (0x30038c): the buttons held down, bit 0 RANDOM, 1 SEARCH,
+ * 2 HISTORY; ZW_HELD=search etc. holds them from the start (safe mode) */
+static uint32_t buttons_held(void)
+{
+	const char *e = getenv("ZW_HELD");
+	uint32_t r = 0;
+	if (e && strstr(e, "random"))
+		r |= 1;
+	if (e && strstr(e, "search"))
+		r |= 2;
+	if (e && strstr(e, "history"))
+		r |= 4;
+	return r;
+}
+
+static uint32_t rd8(uint32_t a)
+{
+	mem_reads++;
+	if (a == 0x30038c)
+		return buttons_held();
+	return *ptr(a, 1);
+}
 static uint32_t rd16(uint32_t a)
 {
 	uint8_t *p;

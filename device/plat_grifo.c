@@ -5,10 +5,22 @@
  * card and grifo chains straight to init.app.
  */
 #include <grifo.h>
+
 #include <stdarg.h>
 #include "../src/plat.h"
 #include "../src/gfx.h"
 #include "../src/app.h"
+
+/* port P6 data: the three buttons (bit 0 RANDOM, 1 SEARCH, 2 HISTORY, as
+ * grifo's button driver reads them) */
+#define REG_P6_P6D (*(volatile unsigned char *)0x0030038c)
+
+int plat_buttons_held(void)
+{
+	unsigned b = REG_P6_P6D & 7u;
+	return ((b & 1u) ? 1 << BTN_RANDOM : 0) | ((b & 2u) ? 1 << BTN_SEARCH : 0) |
+	       ((b & 4u) ? 1 << BTN_HISTORY : 0);
+}
 
 zw_stats_t zw_stats;
 

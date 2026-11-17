@@ -37,6 +37,8 @@ void plat_present(const uint8_t *fb);
 
 /* input */
 int plat_poll(plat_event_t *e);			/* non-blocking: 0 if none */
+/* the buttons held down right now (1 << BTN_...), for safe mode at start */
+int plat_buttons_held(void);
 int plat_wait(plat_event_t *e);			/* block until something happens */
 uint32_t plat_ms(void);
 

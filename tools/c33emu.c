@@ -595,6 +595,13 @@ static int script_step(void)
 				failures++;
 			}
 			cur_line[0] = 0;
+		} else if (!strcmp(cmd, "expectnot")) {
+			describe(d, sizeof(d));
+			if (strstr(d, arg)) {
+				printf("FAIL expectnot \"%s\" got: %s\n", arg, d);
+				failures++;
+			}
+			cur_line[0] = 0;
 		} else if (!strcmp(cmd, "profreset")) {
 			prof_reset();
 			cur_line[0] = 0;

@@ -43,7 +43,10 @@ Type            results update as you type, tap one to open it
                 search bar to bring it back; 123 for digits)
 Drag            scroll (flick to scroll faster)
 Tap a link      open it (links have a dotted underline)
-Tap the page    toolbar: Back, List (sections), Top, Prev, Next
+Tap the page    toolbar: Back, List (sections), Top, Prev, Next, Find
+Find            find in the page: type, and the first match is shown
+                (its first letter inverted). Drag the page to put the
+                keyboard away; < > step through the matches, X stops
 Bottom left     tap the corner of an article to go Back
 Wiki name       tap it on the empty search screen to switch wiki
 Footnotes, Citations

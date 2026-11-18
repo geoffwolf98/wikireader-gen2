@@ -1,6 +1,6 @@
 # zimwiki: ZIM reader firmware for the Openmoko WikiReader
 
-Version 1.0.50 (released as *WikiReader Gen2*). The version and build date
+Version 1.0.51 (released as *WikiReader Gen2*). The version and build date
 are shown at the bottom of the search screen; `zimprep --version` prints
 it for the PC tool.
 
@@ -44,7 +44,8 @@ Contents:
   momentum.
 * **Navigation like a browser**: HISTORY (short press) or the bottom left
   corner goes Back; the toolbar has *Back*, *List* (jump to a section by
-  name), *Top*, *Prev/Next section*. Back remembers your scroll position.
+  name), *Top*, *Prev/Next section* and *Find* (find in the page). Back
+  remembers your scroll position.
 * **History** that survives power off, and the device reopens where you
   left off.
 * **Maths** shown as readable notation (∑, √, sub and superscripts,
@@ -321,7 +322,8 @@ Notes:
 | Type | results update as you type; tap one to open it. Drag the results to put the keyboard away, tap the search bar to bring it back; 123 for digits and punctuation |
 | Drag | scroll an article or a list (flick for momentum) |
 | Tap a link | open it (dotted underline) |
-| Tap elsewhere in an article | toolbar: Back, List (sections: tap one to jump, Back returns), Top, Prev/Next section |
+| Tap elsewhere in an article | toolbar: Back, List (sections: tap one to jump, Back returns), Top, Prev/Next section, Find |
+| Find (toolbar) | find in the page: type and it searches as you go (case, accents and punctuation ignored, parts of words too); the match's first letter is shown inverted with a mark in the margin. Drag or tap the page to put the keyboard away; the bar shows ◀ 3/17 ▶ ✕; tap the word on the bar to type again. Tap the page again, ✕ or any button to stop. Find again in the same page offers the last word. Captions hidden with Pictures off are not searched |
 | Power | saves your place and switches off (also after 2 minutes idle) |
 
 ## The simulator
@@ -506,6 +508,7 @@ now and then, or grifo's watchdog resets the unit after 20 s.
 * 1.0.48: Pictures use Atkinson dithering: cleaner maps and diagrams (white stays white), clearer shapes in photos, and 8 to 11% smaller picture files; it loses some pale shading, so `--dither fs` keeps the old Floyd-Steinberg. Re-run `--add-pictures` to convert a wiki's pictures again. zimprep makes any missing folders in OUTDIR (like mkdir -p) and checks it before reading the ZIM, instead of failing after the title list. slimcheck shows its progress. The card's README.txt covers the calculator, Large text and Pictures. Releases now come as one zip for the card (kernel.elf, init.app, WIKIFONT.BIN, ZWSTATE.DAT, README.txt and the source) plus the source tarball.
 * 1.0.49: `--add-pictures` ran on one thread unless given `--threads` (the default, all CPUs, was worked out after it branched off); it now uses all CPUs and says how many. The slimming line prints GB for big wikis. Figures from the full English Wikipedia (2026-08 maxi, 32 threads, 1.0.47): reclustering 37 min (was 107), the whole text step 39 min (was 1 h 50), HTML 531.6 GB slimmed to 145.6 GB, ZIM pieces 29.6 GB (were 74.0).
 * 1.0.50: Safe mode: hold SEARCH while switching on (until the message) when it crashes or freezes at every start. It clears ZWSTATE.DAT (the page it reopens, the settings, the calculator's Ans), makes the wiki's file map again for that start, and keeps the history; the SEARCH press itself is ignored. The app reads the buttons straight from port P6 at start (one button held is fine with the boot loader; several open its menu). c33emu and zimwiki-headless take ZW_HELD=search to test it; tested on both. zimprep no longer prints "finding pictures 100%" twice.
+* 1.0.51: Find in the page: Find in the article toolbar (now six tools). It searches as you type, ignoring case, accents and punctuation like the title search, and matches parts of words. The text is folded as it is read and matched with KMP, keeping only the last few text offsets, so no copy of the article is made: emulated, a search of a 494 KB test article takes well under a tenth of a second per letter (long pages wait for a 0.25 s pause in typing). Only text that is shown counts: a caption hidden with Pictures off does not. The match's line goes a third of the way down the space above the bar, its first letter inverted and a mark in the margin. Drag the page to put the keyboard away; the bar shows the search, ◀ n/m ▶ and ✕; tap the word to type again; tap the page, ✕ or any button to stop. Find opened again in the same article offers the last word (kept in memory only). fold_utf8 and find share one character fold (fold_one). Test scripts gain expectnot; find is tested on the PC and emulated builds.
 * 1.0.13: saves write only the data (a few KB) over the existing file instead of rewriting all 64 KB: quicker and much less writing to the card.
 * 1.0.12: the device never grows or recreates a save file (a cut-off save left an empty file that froze the next save); a failed save is not retried in a loop (that kept the unit awake); device logging no longer uses the unreliable printf.
 * 1.0.11: zimprep makes each wiki's NAME.HIS and NAME.EXT in advance, and the release has an empty ZWSTATE.DAT: creating files on a nearly full card made the WikiReader freeze or go blank (its FAT code searches the whole card for free space).

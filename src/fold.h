@@ -13,4 +13,9 @@
  * and leading spaces are dropped. */
 size_t fold_utf8(const char *in, size_t inlen, char *out, size_t cap);
 
+/* one character's folded bytes (0 to 8) into out, before the collapsing
+ * of spaces: what fold_utf8 does to each character (find in article
+ * folds the text as it goes with this) */
+int fold_one(uint32_t cp, uint8_t *out);
+
 #endif

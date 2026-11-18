@@ -104,6 +104,9 @@ int lay_pending(const layout_t *l);
 
 /* link under document point (x, y), with a little slack; returns link
  * index or -1 and the fragment rectangle */
+/* where text offset off is laid out: its line and fragment (1), or 0 when
+ * it is not shown (hidden captions, past what is laid out) */
+int lay_find_off(const layout_t *l, uint32_t off, uint32_t *line, uint32_t *frag);
 int lay_hit(const layout_t *l, int x, int32_t y, int *rx, int32_t *ry, int *rw, int *rh);
 
 /* y of the first line at or after document position y with kind

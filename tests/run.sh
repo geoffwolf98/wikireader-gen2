@@ -555,6 +555,59 @@ EOF2
 		$R "$P/card.img" "$P/sm3.txt" "$P/sms" >> "$P/sm.log" 2>&1 \
 			&& ok "safe mode ($(basename "${R%% *}"))" || { bad "safe mode ($(basename "${R%% *}"))"; grep FAIL "$P/sm.log"; }
 	done
+	# find in article: Find in the toolbar, search as you type (case and
+	# accents ignored), drag to put the keyboard away, step with the
+	# arrows, tap the page to close; a caption hidden with Pictures off
+	# does not count; a button closes it
+	cat > "$P/find.txt" <<'EOF2'
+type long page
+tap 60 30
+tap 120 100
+tap 220 196
+expect find="" 0/0 kb
+type Paragraph 3
+expect find="paragraph 3" 1/12 kb
+drag 120 60 120 30 200
+expect find="paragraph 3" 1/12
+expectnot kb
+tap 198 196
+tap 198 196
+expect 3/12
+tap 114 196
+expect 2/12
+tap 120 60
+expectnot find=
+tap 120 100
+tap 220 196
+expect find="paragraph 3"
+button search
+expectnot find=
+button search
+type cattle
+tap 60 30
+tap 120 100
+tap 220 196
+type fleckvieh
+expect find="fleckvieh" 1/2 kb
+type x
+expect 0/0
+button search
+button search
+tap 180 104
+type cattle
+tap 60 30
+tap 120 100
+tap 220 196
+expect find="fleckviehx" 0/0 kb
+tap 228 166
+expect find="fleckvieh" 1/1 kb
+EOF2
+	for R in "$B/zimwiki-headless" "build/c33emu device/build/init.elf"; do
+		[ -x "${R%% *}" ] || continue
+		rm -rf "$P/state"
+		$R "$P/card.img" "$P/find.txt" "$P/state" > "$P/find.log" 2>&1 \
+			&& ok "find in article ($(basename "${R%% *}"))" || { bad "find in article ($(basename "${R%% *}"))"; grep FAIL "$P/find.log"; }
+	done
 	# pictures made from another ZIM are not used
 	mkdir -p "$P/card2/WIKI"
 	cp "$P/none"/WIKI.* "$P/card2/WIKI/"

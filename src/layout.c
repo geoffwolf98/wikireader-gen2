@@ -724,6 +724,46 @@ void lay_prefetch(layout_t *l, int32_t top, int rows)
 	l->prefetched_top = top;	/* nothing left to do here */
 }
 
+static int frag_has(const lay_frag_t *f, uint32_t off)
+{
+	return off >= f->off && off < f->off + f->len;
+}
+
+int lay_find_off(const layout_t *l, uint32_t off, uint32_t *line, uint32_t *frag)
+{
+	uint32_t lo = 0, hi = l->nfrags, k, found = 0xffffffffu;
+	/* fragments run in text order (bar right to left text inside a
+	 * line): search, then look around the spot */
+	while (lo < hi) {
+		uint32_t mid = (lo + hi) / 2;
+		if (l->frags[mid].off <= off)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	for (k = lo > 64 ? lo - 64 : 0; k < l->nfrags && k < lo + 64; ++k)
+		if (frag_has(&l->frags[k], off)) {
+			found = k;
+			break;
+		}
+	if (found == 0xffffffffu)
+		return 0;
+	lo = 0;
+	hi = l->nlines;
+	while (lo < hi) {
+		uint32_t mid = (lo + hi) / 2;
+		if (l->lines[mid].first <= found)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	if (!lo)
+		return 0;
+	*line = lo - 1;
+	*frag = found;
+	return found < l->lines[lo - 1].first + l->lines[lo - 1].nfrag;
+}
+
 int lay_hit(const layout_t *l, int x, int32_t y, int *rx, int32_t *ry, int *rw, int *rh)
 {
 	uint32_t i = line_at(l, y - 6);

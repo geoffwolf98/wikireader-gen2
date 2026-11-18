@@ -181,6 +181,13 @@ int main(int argc, char **argv)
 				failures++;
 			}
 			continue;
+		} else if (!strcmp(cmd, "expectnot")) {
+			app_describe(desc, sizeof(desc));
+			if (strstr(desc, arg)) {
+				printf("FAIL expectnot \"%s\" got: %s\n", arg, desc);
+				failures++;
+			}
+			continue;
 		} else if (!strcmp(cmd, "describe")) {
 			/* printed below */
 		} else if (!strcmp(cmd, "restart")) {

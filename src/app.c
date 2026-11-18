@@ -14,6 +14,7 @@
 #include "font.h"
 #include "gfx.h"
 #include "utf8.h"
+#include "fold.h"
 #include "calc.h"
 
 #define ROW_H       19
@@ -26,6 +27,9 @@ static void pcache_clear(void);
 #define KB_H        (3 * KB_ROW_H)
 #define KB_Y        (SCREEN_H - KB_H)
 #define TOOL_H      24
+#define FIND_H      20	/* the find bar */
+#define FIND_Q      48	/* longest search */
+#define FIND_MAX    999	/* matches kept */
 #define MAX_ROWS    10
 #define HIST_MAX    60
 #define BACK_MAX    32
@@ -102,6 +106,14 @@ static struct app {
 	int nback;
 	int hl_x, hl_w, hl_h;	/* tapped link highlight */
 	int32_t hl_y;
+	/* find in article: the bar at the bottom (over the keyboard while
+	 * typing), the matches as text offsets */
+	int find, find_kb;
+	char fq[FIND_Q + 1];
+	int fqlen;
+	int find_n, find_cur, find_more, find_dirty;
+	uint32_t find_ms;
+	uint32_t find_entry;	/* the article fq was typed in */
 
 	/* history */
 	hist_item_t hist[HIST_MAX];
@@ -268,15 +280,6 @@ static int text_clip_mid(int x, int base, int maxw, int font, const char *s, int
 static void text_centre(int cx, int base, int font, const char *s, int colour)
 {
 	text_at(cx - font_width(font, s, strlen(s)) / 2, base, font, s, colour);
-}
-
-static void triangle(int x, int y, int size, int up, int colour)
-{
-	int i;
-	for (i = 0; i < size; ++i) {
-		int w = up ? 2 * i + 1 : 2 * (size - i) - 1;
-		gfx_hline(A.fb, SCREEN_STRIDE, SCREEN_H, x - w / 2, y + i, w, colour);
-	}
 }
 
 static void triangle_left(int x, int y, int size, int colour)
@@ -799,6 +802,8 @@ static int open_entry(uint32_t entry, int32_t scroll, int push)
 	doc_t nd;
 	layout_t nl;
 	int r;
+	A.find = 0;	/* find belongs to the page it was opened on */
+	A.find_kb = 0;
 
 	if (!A.have_lib)
 		return ZW_ENOTFOUND;
@@ -1959,29 +1964,21 @@ static void draw_search(void)
 /* ------------------------------------------------------------------ */
 /* article view */
 
-#define TOOLS 5
-static const char *const tool_labels[TOOLS] = { "Back", "List", "Top", "Prev", "Next" };
+#define TOOLS 6
+static const char *const tool_labels[TOOLS] = { "Back", "List", "Top", "Prev", "Next", "Find" };
 
 static void draw_toolbar(void)
 {
+	/* six tools in 40 px each: plain names, no arrows (they no longer
+	 * fit beside the words) */
 	int i, y = SCREEN_H - TOOL_H, w = SCREEN_W / TOOLS;
 	fill(0, y, SCREEN_W, TOOL_H, WHITE);
 	hline(0, y, SCREEN_W);
 	hline(0, y + 1, SCREEN_W);
 	for (i = 0; i < TOOLS; ++i) {
-		const char *l = tool_labels[i];
-		int tw = font_width(FONT_BOLD, l, strlen(l));
-		int arrow = i != 1;	/* List has no arrow */
-		int x0 = i * w + (w - tw - (arrow ? 9 : 0)) / 2;
 		if (i)
 			gfx_fill(A.fb, SCREEN_STRIDE, SCREEN_H, i * w, y + 4, 1, TOOL_H - 8, BLACK);
-		if (i == 0)
-			triangle_left(x0, y + 8, 4, BLACK);
-		else if (i == 2 || i == 3)
-			triangle(x0 + 3, y + 10, 4, 1, BLACK);
-		else if (i == 4)
-			triangle(x0 + 3, y + 10, 4, 0, BLACK);
-		text_at(x0 + (arrow ? 9 : 0), y + 17, FONT_BOLD, l, BLACK);
+		text_centre(i * w + w / 2, y + 17, FONT_BOLD, tool_labels[i], BLACK);
 	}
 }
 
@@ -2260,6 +2257,302 @@ static void relayout_article(int large, int pics)
 	A.need_draw = 1;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* find in article: Find in the toolbar opens a bar with the keyboard;
+ * each key searches again (after a short pause on long pages).  Matches
+ * ignore case, accents and punctuation like the title search: the text
+ * is folded as it is read (fold_one) and matched with KMP, keeping only
+ * the last few text offsets, so no copy of the article is made.  Only
+ * text that is shown counts (a caption hidden with Pictures off does
+ * not).  The match's first letter is shown inverted, with a mark in the
+ * margin, its line a third of the way down */
+
+static uint32_t find_hits[FIND_MAX];
+
+static int find_bar_y(void)
+{
+	return A.find_kb ? KB_Y - FIND_H : SCREEN_H - FIND_H;
+}
+
+/* move to the current match if its line is not in view */
+static void find_show(void)
+{
+	uint32_t li, fr;
+	const lay_line_t *ln;
+	int avail = find_bar_y();
+	if (A.find_cur >= A.find_n || !lay_find_off(&A.lay, find_hits[A.find_cur], &li, &fr))
+		return;
+	ln = &A.lay.lines[li];
+	if (ln->y < A.scroll || ln->y + ln->h > A.scroll + avail) {
+		int32_t s2 = ln->y - avail / 3;
+		if (s2 > max_scroll())
+			s2 = max_scroll();
+		if (s2 < 0)
+			s2 = 0;
+		A.scroll = s2;
+		A.state_dirty = 1;
+	}
+	A.vel = 0;
+}
+
+static void run_find(void)
+{
+	char q[2 * FIND_Q + 8];
+	int m, fail[2 * FIND_Q + 8], k, j = 0, last_space = 1, stop = 0;
+	uint32_t ring[256], pos = 0, b, prev = 0xffffffffu;
+	const doc_t *d = &A.doc;
+	int32_t top = A.scroll;
+	A.find_dirty = 0;
+	A.find_n = 0;
+	A.find_cur = 0;
+	A.find_more = 0;
+	A.need_draw = 1;
+	m = (int)fold_utf8(A.fq, (size_t)A.fqlen, q, sizeof(q));
+	if (!m || !A.have_article)
+		return;
+	fail[0] = 0;
+	for (k = 1; k < m; ++k) {
+		int t = fail[k - 1];
+		while (t && q[k] != q[t])
+			t = fail[t - 1];
+		if (q[k] == q[t])
+			t++;
+		fail[k] = t;
+	}
+	for (b = 0; b < d->nblocks && !stop; ++b) {
+		const doc_block_t *bl = &d->blocks[b];
+		uint32_t r;
+		for (r = 0; r < bl->nruns && !stop; ++r) {
+			const doc_run_t *ru = &d->runs[bl->first_run + r];
+			const uint8_t *p = (const uint8_t *)d->text + ru->start, *end = p + ru->len;
+			/* between blocks: a space */
+			int lead = r == 0;
+			while ((p < end || lead) && !stop) {
+				const uint8_t *c0 = p;
+				uint8_t t[8];
+				int n, i;
+				if (lead) {
+					t[0] = ' ';
+					n = 1;
+					lead = 0;
+				} else {
+					uint32_t cp = utf8_next(&p, end);
+					n = cp <= ' ' || cp == 0xa0 ? (t[0] = ' ', 1) : fold_one(cp, t);
+				}
+				for (i = 0; i < n; ++i) {
+					uint8_t c = t[i];
+					if (c == ' ') {
+						if (last_space)
+							continue;
+						last_space = 1;
+					} else {
+						last_space = 0;
+					}
+					ring[pos & 255] = (uint32_t)((const char *)c0 - d->text);
+					pos++;
+					while (j && c != (uint8_t)q[j])
+						j = fail[j - 1];
+					if (c == (uint8_t)q[j])
+						j++;
+					if (j == m) {
+						uint32_t so = ring[(pos - (uint32_t)m) & 255], li, fr;
+						j = fail[j - 1];
+						if (so == prev || !lay_find_off(&A.lay, so, &li, &fr))
+							continue;
+						prev = so;
+						if (A.find_n == FIND_MAX) {
+							A.find_more = 1;
+							stop = 1;
+							break;
+						}
+						/* the first one from where you are reading */
+						if (A.lay.lines[li].y < top)
+							A.find_cur = A.find_n + 1;
+						find_hits[A.find_n++] = so;
+					}
+				}
+			}
+		}
+	}
+	if (A.find_cur >= A.find_n)
+		A.find_cur = 0;
+	find_show();
+}
+
+static void find_open(void)
+{
+	finish_layout();	/* every match has a place */
+	A.find = 1;
+	A.find_kb = 1;
+	A.kb_layer = 0;
+	A.toolbar = 0;
+	/* the last search is offered again in the same article; another
+	 * starts empty */
+	if (A.find_entry != A.entry) {
+		A.fqlen = 0;
+		A.fq[0] = 0;
+		A.find_entry = A.entry;
+	}
+	A.find_n = 0;
+	if (A.fqlen)
+		run_find();
+	A.need_draw = 1;
+}
+
+static void find_close(void)
+{
+	A.find = 0;
+	A.find_kb = 0;
+	A.find_dirty = 0;
+	A.need_draw = 1;
+}
+
+static void find_changed(void)
+{
+	A.find_dirty = 1;
+	A.find_ms = plat_ms();
+	A.need_draw = 1;
+}
+
+static void find_backspace(void)
+{
+	if (!A.fqlen)
+		return;
+	A.fqlen--;
+	while (A.fqlen && ((unsigned char)A.fq[A.fqlen] & 0xc0) == 0x80)
+		A.fqlen--;
+	A.fq[A.fqlen] = 0;
+	find_changed();
+}
+
+static void find_key(int code)
+{
+	if (code == K_SHIFT) {
+		A.kb_layer = !A.kb_layer;
+		A.need_draw = 1;
+		return;
+	}
+	if (code == K_BS || A.fqlen >= FIND_Q)
+		return;
+	if (code == ' ' && (!A.fqlen || A.fq[A.fqlen - 1] == ' '))
+		return;
+	A.fq[A.fqlen++] = (char)code;
+	A.fq[A.fqlen] = 0;
+	find_changed();
+}
+
+static void find_step(int dir)
+{
+	if (!A.find_n)
+		return;
+	A.find_cur = (A.find_cur + dir + A.find_n) % A.find_n;
+	find_show();
+	A.need_draw = 1;
+}
+
+/* the bar: search text | < | n/m | > | X */
+#define FB_PREV 100
+#define FB_COUNT 128
+#define FB_NEXT 184
+#define FB_CLOSE 212
+
+static void find_bar_tap(int x)
+{
+	if (x < FB_PREV) {
+		A.find_kb = 1;	/* edit the search */
+		A.need_draw = 1;
+	} else if (x < FB_COUNT) {
+		find_step(-1);
+	} else if (x < FB_NEXT) {
+		/* the count: also the next one */
+		find_step(1);
+	} else if (x < FB_CLOSE) {
+		find_step(1);
+	} else {
+		find_close();
+	}
+}
+
+static void draw_find(void)
+{
+	int y0 = find_bar_y(), i;
+	char cnt[24];
+	uint32_t li, fr;
+	/* the match: its first letter inverted, a mark in the margin */
+	if (A.find_cur < A.find_n && lay_find_off(&A.lay, find_hits[A.find_cur], &li, &fr)) {
+		const lay_line_t *ln = &A.lay.lines[li];
+		const lay_frag_t *f = &A.lay.frags[fr];
+		uint32_t o = find_hits[A.find_cur];
+		const uint8_t *c = (const uint8_t *)A.doc.text + o, *ce = (const uint8_t *)A.doc.text + f->off + f->len;
+		int x, w, y = (int)(ln->y - A.scroll);
+		x = f->x + font_width(f->font, A.doc.text + f->off, o - f->off);
+		utf8_next(&c, ce);
+		w = font_width(f->font, A.doc.text + o, (size_t)(c - ((const uint8_t *)A.doc.text + o)));
+		if (w < 2)
+			w = 2;
+		if (y + ln->h > 0 && y < y0) {
+			int h = ln->h, cy = y + ln->h / 2;
+			if (y + h > y0)
+				h = y0 - y;
+			gfx_fill(A.fb, SCREEN_STRIDE, SCREEN_H, x - 1, y, w + 1, h, INVERT);
+			for (i = 0; i < 3; ++i)
+				if (cy - 3 + i >= 0 && cy + 3 - i < y0)
+					fill(i, cy - 3 + i, 1, 7 - 2 * i, BLACK);
+		}
+	}
+	/* the bar */
+	fill(0, y0, SCREEN_W, FIND_H, WHITE);
+	hline(0, y0, SCREEN_W);
+	hline(0, y0 + 1, SCREEN_W);
+	if (A.fqlen) {
+		int x = text_clip(4, y0 + 15, FB_PREV - 10, FONT_TEXT, A.fq, BLACK);
+		if (A.find_kb)
+			fill(x + 1, y0 + 4, 2, 13, BLACK);	/* cursor */
+	} else {
+		if (A.find_kb)
+			fill(4, y0 + 4, 2, 13, BLACK);
+		text_clip(A.find_kb ? 9 : 4, y0 + 15, FB_PREV - 12, FONT_ITALIC, "Find in page", BLACK);
+	}
+	for (i = 1; i < 4; ++i) {
+		static const int xs[3] = { FB_PREV, FB_NEXT, FB_CLOSE };
+		gfx_fill(A.fb, SCREEN_STRIDE, SCREEN_H, xs[i - 1], y0 + 4, 1, FIND_H - 6, BLACK);
+	}
+	triangle_left((FB_PREV + FB_COUNT) / 2 - 2, y0 + 6, 5, BLACK);
+	for (i = 0; i < 5; ++i)	/* the next arrow */
+		fill((FB_NEXT + FB_CLOSE) / 2 - 2 + i, y0 + 6 + i, 1, 11 - 2 * i, BLACK);
+	if (!A.fqlen)
+		cnt[0] = 0;
+	else if (A.find_dirty)
+		strcpy(cnt, "\xe2\x80\xa6");
+	else if (!A.find_n)
+		strcpy(cnt, "none");
+	else {
+		/* "12/345", "12/999+" */
+		char a[12], b2[12];
+		int na = 0, nb = 0, v = A.find_cur + 1, t;
+		do { a[na++] = (char)('0' + v % 10); v /= 10; } while (v);
+		v = A.find_n;
+		do { b2[nb++] = (char)('0' + v % 10); v /= 10; } while (v);
+		for (t = 0; t < na; ++t)
+			cnt[t] = a[na - 1 - t];
+		cnt[na] = '/';
+		for (t = 0; t < nb; ++t)
+			cnt[na + 1 + t] = b2[nb - 1 - t];
+		cnt[na + 1 + nb] = 0;
+		if (A.find_more)
+			strcat(cnt, "+");
+	}
+	text_centre((FB_COUNT + FB_NEXT) / 2, y0 + 15, FONT_SMALL, cnt, BLACK);
+	/* the X */
+	for (i = 0; i < 9; ++i) {
+		fill(FB_CLOSE + 10 + i, y0 + 6 + i, 2, 1, BLACK);
+		fill(FB_CLOSE + 18 - i, y0 + 6 + i, 2, 1, BLACK);
+	}
+	if (A.find_kb)
+		draw_keyboard();
+}
+
 static void show_sections(void)
 {
 	int i;
@@ -2284,6 +2577,10 @@ static void draw_article(void)
 	if (A.hl_w)
 		gfx_fill(A.fb, SCREEN_STRIDE, SCREEN_H, A.hl_x - 1, (int)(A.hl_y - A.scroll),
 			 A.hl_w + 2, A.hl_h, INVERT);
+	if (A.find) {
+		draw_find();
+		return;
+	}
 	if (A.show_bar && A.lay.height > SCREEN_H) {
 		int h = (int)((int64_t)SCREEN_H * SCREEN_H / A.lay.height);
 		int y;
@@ -2323,6 +2620,9 @@ static void tool_tap(int x)
 		}
 		if (t >= 0)
 			A.scroll = t > max_scroll() ? max_scroll() : t;
+		break;
+	case 5:
+		find_open();
 		break;
 	}
 	A.state_dirty = 1;
@@ -2503,6 +2803,8 @@ static void button(int code)
 		return;
 	A.toolbar = 0;
 	A.vel = 0;
+	if (A.find)
+		find_close();
 	if (A.screen == S_CALC && (code == BTN_SEARCH || code == BTN_HISTORY)) {
 		/* leave the calculator: HISTORY back to where you were,
 		 * SEARCH to the search screen */
@@ -2550,6 +2852,17 @@ static void touch_down(int x, int y)
 	case S_CALC:
 		A.pressed_key = calc_key_at(x, y);
 		A.need_draw = 1;
+		break;
+	case S_ARTICLE:
+		if (A.find && A.find_kb && y >= KB_Y) {
+			A.pressed_key = key_at(x, y);
+			A.key_down_ms = A.key_repeat_ms = plat_ms();
+			if (A.pressed_key >= 0 && keys[A.pressed_key].code == K_BS) {
+				find_backspace();
+				A.key_repeat_ms += 350;
+			}
+			A.need_draw = 1;
+		}
 		break;
 	case S_SEARCH:
 		if (A.kb_visible && y >= KB_Y) {
@@ -2617,7 +2930,7 @@ static void touch_move(int x, int y)
 		return;
 	if (!A.dragging && (y - A.ty0 > DRAG_START || A.ty0 - y > DRAG_START ||
 			    x - A.tx0 > DRAG_START * 2 || A.tx0 - x > DRAG_START * 2)) {
-		if ((A.screen == S_SEARCH || A.screen == S_CALC) && A.pressed_key >= 0) {
+		if ((A.screen == S_SEARCH || A.screen == S_CALC || A.screen == S_ARTICLE) && A.pressed_key >= 0) {
 			/* sliding on the keyboard: just track the key */
 		} else {
 			A.dragging = 1;
@@ -2638,7 +2951,7 @@ static void touch_move(int x, int y)
 		}
 		return;
 	}
-	if (A.screen == S_SEARCH && A.pressed_key >= 0) {
+	if ((A.screen == S_SEARCH || A.screen == S_ARTICLE) && A.pressed_key >= 0) {
 		int k = y >= KB_Y ? key_at(x, y) : -1;
 		if (k != A.pressed_key) {
 			A.pressed_key = k;
@@ -2660,6 +2973,11 @@ static void touch_move(int x, int y)
 			A.scroll = s;
 			A.show_bar = 1;
 			A.toolbar = 0;
+			A.need_draw = 1;
+		}
+		/* dragging the page puts the find keyboard away */
+		if (A.find && A.find_kb) {
+			A.find_kb = 0;
 			A.need_draw = 1;
 		}
 		break;
@@ -2768,6 +3086,24 @@ static void touch_up(int x, int y)
 		}
 		return;
 	case S_ARTICLE:
+		if (A.find && key >= 0) {
+			if (keys[key].code != K_BS)
+				find_key(keys[key].code);
+			return;
+		}
+		if (A.find && !was_drag) {
+			int by = find_bar_y();
+			if (y >= by && y < by + FIND_H)
+				find_bar_tap(x);
+			else if (A.find_kb && y >= KB_Y)
+				;	/* between keys */
+			else if (A.find_kb)
+				A.find_kb = 0;	/* tap the page: keyboard away */
+			else
+				find_close();	/* tap again: back to reading */
+			A.need_draw = 1;
+			return;
+		}
 		if (was_drag) {
 			/* fling: velocity from the last two samples */
 			int32_t dt = (int32_t)(A.t_last - A.t_prev);
@@ -2928,6 +3264,14 @@ void app_event(const void *ev)
 			A.need_draw = 1;
 			break;
 		}
+		/* find in article with its keyboard up: typing goes there */
+		if (A.screen == S_ARTICLE && A.find && A.find_kb) {
+			if (e->code == 8)
+				find_backspace();
+			else if (e->code >= 32 && e->code < 127)
+				find_key(e->code >= 'A' && e->code <= 'Z' ? e->code + 32 : e->code);
+			break;
+		}
 		/* host keyboard shortcut for typing */
 		if (A.screen != S_SEARCH && A.have_lib && e->code >= 32)
 			goto_search();
@@ -2973,7 +3317,8 @@ static int button_settling(void)
 static int animating(void)
 {
 	return A.vel != 0 || A.hist_down || A.rnd_down || button_settling() || (A.touching && A.pressed_key >= 0 &&
-			      keys[A.pressed_key].code == K_BS && A.screen == S_SEARCH);
+			      keys[A.pressed_key].code == K_BS && (A.screen == S_SEARCH || A.screen == S_ARTICLE)) ||
+	       (A.find && A.find_dirty);
 }
 
 static void tick(void)
@@ -3020,9 +3365,12 @@ static void tick(void)
 	} else {
 		A.vel = 0;
 	}
-	if (A.touching && A.screen == S_SEARCH && A.pressed_key >= 0 &&
+	if (A.touching && (A.screen == S_SEARCH || (A.screen == S_ARTICLE && A.find)) && A.pressed_key >= 0 &&
 	    keys[A.pressed_key].code == K_BS && (int32_t)(now - A.key_repeat_ms) >= 0) {
-		query_backspace();
+		if (A.screen == S_ARTICLE)
+			find_backspace();
+		else
+			query_backspace();
 		A.key_repeat_ms = now + 90;
 		A.need_draw = 1;
 	}
@@ -3031,6 +3379,13 @@ static void tick(void)
 /* returns 1 if it did something */
 static int idle_work(void)
 {
+	/* find in article: search once typing pauses (at once on short
+	 * pages, after 0.25 s on long ones, where a search takes longer) */
+	if (A.find && A.find_dirty && A.screen == S_ARTICLE &&
+	    plat_ms() - A.find_ms >= (A.doc.text_len > 150000 ? 250u : 0u)) {
+		run_find();
+		return 1;
+	}
 	if (A.search_dirty && A.screen == S_SEARCH) {
 		run_search();
 		return 1;
@@ -3331,6 +3686,10 @@ void app_describe(char *out, int cap)
 				     A.title, (int)A.scroll, (int)max_scroll(), A.nback, (unsigned)np,
 				     np && !A.lay.pics ? " hidden" : "",
 				     lay_pending(&A.lay) ? " picwait" : "");
+			if (A.find && n > 0 && n < (int)sizeof(tmp))
+				n += snprintf(tmp + n, sizeof(tmp) - (size_t)n, " find=\"%s\" %d/%d%s%s", A.fq,
+					      A.find_n ? A.find_cur + 1 : 0, A.find_n, A.find_more ? "+" : "",
+					      A.find_kb ? " kb" : "");
 		}
 		break;
 	case S_SEARCH:

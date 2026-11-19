@@ -38,6 +38,8 @@ int plat_wait(plat_event_t *e)
 	return host_dequeue(e);
 }
 
+extern int host_stop_stage;
+
 static void ev(int type, int x, int y, int code)
 {
 	plat_event_t e;
@@ -168,6 +170,8 @@ int main(int argc, char **argv)
 			advance((uint32_t)ms);
 			ev(PE_BUTTON_UP, 0, 0, code);
 			advance(150);
+		} else if (!strcmp(cmd, "stopat") && sscanf(arg, "%d", &a) == 1) {
+			host_stop_stage = a;	/* tap during the next opening's stage a */
 		} else if (!strcmp(cmd, "slowdraw") && sscanf(arg, "%d", &a) == 1) {
 			host_present_ms = (uint32_t)a;	/* a slow frame: a stall */
 		} else if (!strcmp(cmd, "wait") && sscanf(arg, "%d", &a) == 1) {

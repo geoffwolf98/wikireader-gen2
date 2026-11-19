@@ -537,7 +537,15 @@ static int script_step(void)
 		line_sectors = sectors_read;
 		arg[0] = 0;
 		sscanf(line, "%31s %899[^\n]", cmd, arg);
-		if (!strcmp(cmd, "tap") && sscanf(arg, "%d %d", &a, &b) == 2) {
+		if (!strcmp(cmd, "tap2") && sscanf(arg, "%d %d %d %d %d", &a, &b, &c2, &dd, &e) == 5) {
+			/* a tap, then another e ms later (to stop the opening
+			 * the first one started) */
+			enqueue(EV_DOWN, a, b, 0, t);
+			enqueue(EV_UP, a, b, 0, t + 60 * MHZ * 1000ull);
+			enqueue(EV_DOWN, c2, dd, 0, t + (uint64_t)e * MHZ * 1000);
+			enqueue(EV_UP, c2, dd, 0, t + (uint64_t)(e + 60) * MHZ * 1000);
+			return 1;
+		} else if (!strcmp(cmd, "tap") && sscanf(arg, "%d %d", &a, &b) == 2) {
 			enqueue(EV_DOWN, a, b, 0, t);
 			enqueue(EV_UP, a, b, 0, t + 60 * MHZ * 1000ull);
 			return 1;
@@ -1196,6 +1204,13 @@ int main(int argc, char **argv)
 	card = fopen(argv[a + 1], "rb");
 	script = fopen(argv[a + 2], "r");
 	if (!card || !script) { fprintf(stderr, "cannot open card or script\n"); return 1; }
+	if (getenv("ZW_EARLY_TAP")) {
+		/* tests: a tap this many ms after power on (to stop the page
+		 * reopened at start) */
+		uint64_t ms = strtoull(getenv("ZW_EARLY_TAP"), NULL, 10);
+		enqueue(EV_DOWN, 240, 150, 0, ms * MHZ * 1000);
+		enqueue(EV_UP, 240, 150, 0, (ms + 60) * MHZ * 1000);
+	}
 	memset(&C, 0, sizeof(C));
 	C.sp = MAIN_STACK;
 	C.r[15] = DP_USER;

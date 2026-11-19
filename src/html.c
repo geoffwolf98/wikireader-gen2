@@ -1795,6 +1795,10 @@ int html_to_doc(doc_t *d, const char *html, uint32_t len,
 		if (s - kick > 16384) {
 			ZW_PROGRESS(2, (uint32_t)(s - html), len);
 			kick = s;
+			if (zw_cancel) {
+				p->err = ZW_ECANCEL;
+				break;
+			}
 		}
 		if (*s == '<') {
 			const char *q = s + 1;

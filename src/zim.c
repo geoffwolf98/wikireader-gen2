@@ -425,6 +425,8 @@ static int slot_fill(zim_t *z, zim_slot_t *s, uint32_t need)
 			out.pos = s->out_len;
 			ZW_PROGRESS(1, (uint32_t)((s->in_pos - s->in_start) >> 10),
 				    (uint32_t)((s->in_end - s->in_start) >> 10));
+			if (zw_cancel)
+				return ZW_ECANCEL;	/* zim_blob drops the slot */
 			ret = ZSTD_decompressStream((ZSTD_DStream *)s->zstd, &out, &in);
 			if (ZSTD_isError(ret)) {
 				if (ZSTD_getErrorCode(ret) == ZSTD_error_dstSize_tooSmall) {
@@ -461,6 +463,8 @@ static int slot_fill(zim_t *z, zim_slot_t *s, uint32_t need)
 			b.out_size = s->out_cap;
 			ZW_PROGRESS(1, (uint32_t)((s->in_pos - s->in_start) >> 10),
 				    (uint32_t)((s->in_end - s->in_start) >> 10));
+			if (zw_cancel)
+				return ZW_ECANCEL;	/* zim_blob drops the slot */
 			ret = xz_dec_run((struct xz_dec *)s->xz, &b);
 			s->in_off = (uint32_t)b.in_pos;
 			s->out_len = (uint32_t)b.out_pos;
@@ -602,7 +606,8 @@ int zim_blob(zim_t *z, uint32_t cluster, uint32_t blob,
 	return ZW_OK;
 
 fail:
-	zw_log("zim_blob: cluster %u blob %u failed (%d)", (unsigned)cluster, (unsigned)blob, r);
+	if (r != ZW_ECANCEL)
+		zw_log("zim_blob: cluster %u blob %u failed (%d)", (unsigned)cluster, (unsigned)blob, r);
 	slot_free(s);
 	return r;
 }

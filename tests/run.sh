@@ -608,6 +608,66 @@ EOF2
 		$R "$P/card.img" "$P/find.txt" "$P/state" > "$P/find.log" 2>&1 \
 			&& ok "find in article ($(basename "${R%% *}"))" || { bad "find in article ($(basename "${R%% *}"))"; grep FAIL "$P/find.log"; }
 	done
+	# tap to stop: a tap while a page opens stops it and leaves you where
+	# you were (the old article kept, nothing added to history); at start
+	# it gives an empty search and the next start does not try the page
+	# again.  On the PC build "stopat N" taps during stage N (1 unpacking,
+	# 2 reading, 4 WIKIFONT.BIN: that load is never stopped, the tap
+	# stops the opening just after it, and the font stays loaded)
+	cat > "$P/stop1.txt" <<'EOF2'
+type huge page
+stopat 1
+tap 60 30
+expect search "huge page"
+button search
+type cattle
+tap 60 30
+expect article "Cattle"
+button search
+button search
+type huge page
+stopat 2
+tap 60 30
+expect search "huge page"
+stopat -1
+button history
+expect article "Cattle"
+button search
+button search
+type kanji
+stopat 4
+tap 60 30
+expect search "kanji"
+tap 60 30
+expect article "Kanji"
+EOF2
+	printf 'type huge page\ntap 60 30\nexpect article "Huge page"\nwait 3000\n' > "$P/stop2.txt"
+	printf 'expect search ""\nwait 3000\n' > "$P/stop3.txt"
+	rm -rf "$P/stops"; mkdir -p "$P/stops"; cp card/WIKIFONT.BIN "$P/stops/"
+	if $B/zimwiki-headless "$P/card.img" "$P/stop1.txt" "$P/stops" > "$P/stop.log" 2>&1 &&
+	   [ "$(grep -c 'WIKIFONT.BIN loaded' "$P/stop.log")" = 1 ] && grep -q "open_entry .* stopped" "$P/stop.log" &&
+	   ! grep -q '"Huge page"' "$P/stops/"*.HIS 2>/dev/null &&
+	   rm -f "$P/stops/ZWSTATE.DAT" && $B/zimwiki-headless "$P/card.img" "$P/stop2.txt" "$P/stops" >> "$P/stop.log" 2>&1 &&
+	   ZW_STOP_STAGE=2 $B/zimwiki-headless "$P/card.img" "$P/stop3.txt" "$P/stops" >> "$P/stop.log" 2>&1 &&
+	   $B/zimwiki-headless "$P/card.img" "$P/stop3.txt" "$P/stops" >> "$P/stop.log" 2>&1; then
+		ok "tap to stop (zimwiki-headless)"
+	else
+		bad "tap to stop (zimwiki-headless)"; grep -E "FAIL|WIKIFONT|stopped" "$P/stop.log"
+	fi
+	# the emulated device, in emulated time: a second tap 0.5 s after the
+	# one that opens a 390 KB page; and a tap 0.7 s after power on
+	printf 'type huge page\ntap2 60 30 500 240 150\nexpect search "huge page"\nwait 2000\nexpect search "huge page"\n' > "$P/stope.txt"
+	if [ -x build/c33emu ]; then
+		rm -rf "$P/stops"
+		if build/c33emu device/build/init.elf "$P/card.img" "$P/stope.txt" "$P/stops" > "$P/stope.log" 2>&1 &&
+		   rm -f "$P/stops/ZWSTATE.DAT" && build/c33emu device/build/init.elf "$P/card.img" "$P/stop2.txt" "$P/stops" >> "$P/stope.log" 2>&1 &&
+		   ZW_EARLY_TAP=700 build/c33emu device/build/init.elf "$P/card.img" "$P/stop3.txt" "$P/stops" >> "$P/stope.log" 2>&1 &&
+		   build/c33emu device/build/init.elf "$P/card.img" "$P/stop3.txt" "$P/stops" >> "$P/stope.log" 2>&1; then
+			ok "tap to stop (c33emu)"
+		else
+			bad "tap to stop (c33emu)"; grep -E "FAIL" "$P/stope.log"
+		fi
+	fi
 	# pictures made from another ZIM are not used
 	mkdir -p "$P/card2/WIKI"
 	cp "$P/none"/WIKI.* "$P/card2/WIKI/"
@@ -633,6 +693,20 @@ EOF2
 		&& ok "pictures of another build ignored" || { bad "pictures of another build ignored"; cat "$P/app3.log"; }
 else
 	echo "skip  pictures (needs ZIM_TESTS, libzim and Pillow for Python, libwebp)"
+fi
+
+# a title index past the 4 GiB limit is refused before any slow step
+# (ZW_IDX_LIMIT lowers the limit; the size check is exact)
+if [ -f build/test/rc2.zim ]; then
+	rm -rf build/test/idxlim
+	if ZW_IDX_LIMIT=530963 $B/zimprep --recluster 64 build/test/rc2.zim build/test/idxlim > build/test/idxlim.log 2>&1; then
+		bad "index limit"
+	elif grep -q "limited to 4 GiB" build/test/idxlim.log && ! ls build/test/idxlim/*.Z* > /dev/null 2>&1 &&
+	     ZW_IDX_LIMIT=530964 $B/zimprep build/test/rc2.zim build/test/idxlim > /dev/null 2>&1; then
+		ok "index limit"
+	else
+		bad "index limit"; cat build/test/idxlim.log
+	fi
 fi
 
 echo "$pass passed, $fail failed"

@@ -48,6 +48,8 @@ Find            find in the page: type, and the first match is shown
                 (its first letter inverted). Drag the page to put the
                 keyboard away; < > step through the matches, X stops
 Bottom left     tap the corner of an article to go Back
+Opening a page  tap the screen to stop and stay where you were (at
+                switch-on: an empty search instead of the last page)
 Wiki name       tap it on the empty search screen to switch wiki
 Footnotes, Citations
                 switches on the empty search screen (tap to turn on or
@@ -72,8 +74,10 @@ source package.
 Problems
 --------
 * It crashes or freezes every time it starts (it reopens the last page):
-  hold SEARCH while switching on, until "Safe mode" appears. That forgets
-  the last page and the settings (history is kept).
+  switch on, wait for the WikiReader logo, then press and hold SEARCH
+  until "Safe mode" appears. That forgets the last page and the settings
+  (history is kept). Holding SEARCH before the logo opens the built-in
+  contrast menu instead.
 * The WikiReader shows its contrast menu, as if there were no card: some
   microSD cards are not recognised by the WikiReader's built-in loader.
   Try a different make of card.

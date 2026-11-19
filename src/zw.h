@@ -10,7 +10,7 @@
 #define ZW_H
 
 /* release number: shown on the search screen and by zimprep --version */
-#define ZW_VERSION "1.0.51"
+#define ZW_VERSION "1.0.53"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -30,6 +30,7 @@ enum {
 	ZW_ENOTFOUND = -4,
 	ZW_ERANGE = -5,
 	ZW_EUNSUPPORTED = -6,
+	ZW_ECANCEL = -7,	/* stopped by the reader (a tap while opening) */
 };
 
 /* memory (implemented by the platform layer) */
@@ -98,6 +99,11 @@ extern zw_stats_t zw_stats;
 extern void (*zw_progress)(int stage, uint32_t done, uint32_t total);
 #define ZW_PROGRESS(st, d, t) do { if (zw_progress) zw_progress((st), (d), (t)); } while (0)
 #define ZW_KEEPALIVE() ZW_PROGRESS(0, 0, 0)
+/* set by the progress callback when the reader asks to stop opening a
+ * page; the decompress, HTML and layout loops then return ZW_ECANCEL.
+ * Never set during stage 4 (WIKIFONT.BIN being read), so a font load
+ * always completes.  Always 0 in the PC tools. */
+extern int zw_cancel;
 
 /* debug log (platform) */
 void zw_log(const char *fmt, ...)

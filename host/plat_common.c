@@ -125,6 +125,32 @@ int plat_save(const char *name, const void *data, uint32_t len)
 uint32_t host_present_ms;	/* tests: each frame takes this long */
 
 /* ZW_HELD=search (or history, random): held down at start (safe mode) */
+/* tests: "stopat STAGE" in a script, or ZW_STOP_STAGE for the opening at
+ * start, queues one tap (down and up) at the next progress report of that
+ * stage (1 unpacking, 2 reading, 3 layout, 4 a file such as WIKIFONT.BIN) */
+int host_stop_stage = -1;
+void plat_test_progress(int stage)
+{
+	static int env_read;
+	if (!env_read) {
+		const char *e = getenv("ZW_STOP_STAGE");
+		env_read = 1;
+		if (e && host_stop_stage < 0)
+			host_stop_stage = atoi(e);
+	}
+	if (stage == host_stop_stage) {
+		plat_event_t e;
+		memset(&e, 0, sizeof(e));
+		e.type = PE_TOUCH_DOWN;
+		e.x = 240;
+		e.y = 150;
+		host_queue(&e);
+		e.type = PE_TOUCH_UP;
+		host_queue(&e);
+		host_stop_stage = -1;
+	}
+}
+
 int plat_buttons_held(void)
 {
 	const char *e = getenv("ZW_HELD");

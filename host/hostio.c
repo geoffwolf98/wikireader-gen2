@@ -134,3 +134,4 @@ void host_files_close(host_files_t *f)
 
 /* see zw.h: nothing to feed on the PC */
 void (*zw_progress)(int stage, uint32_t done, uint32_t total);
+int zw_cancel;

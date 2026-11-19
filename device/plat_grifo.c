@@ -15,6 +15,11 @@
  * grifo's button driver reads them) */
 #define REG_P6_P6D (*(volatile unsigned char *)0x0030038c)
 
+void plat_test_progress(int stage)
+{
+	(void)stage;
+}
+
 int plat_buttons_held(void)
 {
 	unsigned b = REG_P6_P6D & 7u;
@@ -345,6 +350,7 @@ void plat_power_off(void)
 /* ------------------------------------------------------------------ */
 
 void (*zw_progress)(int stage, uint32_t done, uint32_t total);
+int zw_cancel;
 
 void plat_keepalive(void)
 {

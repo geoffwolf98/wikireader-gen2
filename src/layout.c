@@ -437,7 +437,7 @@ int lay_more(layout_t *l, int32_t until_y, uint32_t max_blocks)
 	memset(&b, 0, sizeof(b));
 	b.l = l;
 	b.y = l->built_y;
-	while (l->next_block < d->nblocks && !b.err &&
+	while (l->next_block < d->nblocks && !b.err && !zw_cancel &&
 	       (until_y < 0 || b.y < until_y) && (!max_blocks || n < max_blocks)) {
 		i = l->next_block;
 		if ((i & 63) == 63)
@@ -458,7 +458,7 @@ int lay_more(layout_t *l, int32_t until_y, uint32_t max_blocks)
 			l->strip_id[i] = -1;
 	if (n)
 		l->prefetched_top = -1;
-	return b.err;
+	return zw_cancel ? ZW_ECANCEL : b.err;
 }
 
 int lay_build(layout_t *l, const doc_t *d)

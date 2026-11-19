@@ -88,6 +88,10 @@ pages = [
     ('Long_page', 'Long page',
      para(60, 'length') + figure(MAP, 'A map far down the page') + para(5, 'length')),
     ('Plain', 'Plain', para(4, 'nothing')),
+    # big enough to stop while opening (tap to stop), and one needing
+    # WIKIFONT.BIN (the font load is never stopped)
+    ('Huge_page', 'Huge page', para(3000, 'bulk')),
+    ('Kanji', 'Kanji', '<p>\u6f22\u5b57 \u65e5\u672c\u8a9e \u4e2d\u6587</p>' + para(3, 'kanji')),
 ]
 
 with Creator(sys.argv[2]).config_indexing(False, 'eng').config_clustersize(64 * 1024) as c:

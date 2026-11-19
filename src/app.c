@@ -144,6 +144,10 @@ static struct app {
 	int hist_down;		/* HISTORY pressed, not yet resolved */
 	uint32_t hist_down_ms;
 	int opening;		/* an article is being opened: show progress */
+	uint8_t eat_touch;	/* the tap that stopped an opening: its move/up */
+	uint8_t eat_buttons;	/* ... or the button: its release (bit per code) */
+	plat_event_t deferred[8];	/* other input seen while opening */
+	int ndeferred, deferred_at;
 	uint32_t open_t0, open_drawn;
 	int font_loading;	/* WIKIFONT.BIN being read: spinner top right */
 	uint32_t spin_t;
@@ -335,6 +339,48 @@ static void banner(const char *s)
 
 /* progress while opening an article: decompressing ~45%, reading the
  * HTML ~45%, layout ~10%.  Shown only on slow (big) pages. */
+/* while an article opens (A.opening == 1): a tap or a button stops it.
+ * The stopping touch or press is used up (its move and release too, here
+ * or later in app_event); other input is kept for after.  Never called
+ * while WIKIFONT.BIN is read (stage 4), so a font load always finishes:
+ * a tap then waits in the queue and stops the opening just after. */
+static void open_poll(void)
+{
+	plat_event_t e;
+	while (plat_poll(&e)) {
+		switch (e.type) {
+		case PE_TOUCH_DOWN:
+			zw_cancel = 1;
+			A.eat_touch = 1;
+			continue;
+		case PE_TOUCH_MOVE:
+		case PE_TOUCH_UP:
+			if (A.eat_touch) {
+				if (e.type == PE_TOUCH_UP)
+					A.eat_touch = 0;
+				continue;
+			}
+			break;
+		case PE_BUTTON_DOWN:
+			if (A.safe_swallow && e.code == BTN_SEARCH)
+				break;	/* safe mode's own SEARCH */
+			zw_cancel = 1;
+			A.eat_buttons |= (uint8_t)(1u << (e.code & 7));
+			continue;
+		case PE_BUTTON_UP:
+			if (A.eat_buttons & (1u << (e.code & 7))) {
+				A.eat_buttons &= (uint8_t)~(1u << (e.code & 7));
+				continue;
+			}
+			break;
+		default:
+			break;
+		}
+		if (A.ndeferred < (int)ZW_COUNT(A.deferred))
+			A.deferred[A.ndeferred++] = e;
+	}
+}
+
 static void open_progress(int stage, uint32_t done, uint32_t total)
 {
 	/* reading and parsing are most of opening a page: only the first
@@ -344,6 +390,10 @@ static void open_progress(int stage, uint32_t done, uint32_t total)
 	int x = 40, y = 134, w = SCREEN_W - 80;
 	char t[8];
 	plat_keepalive();
+	if (A.opening == 1)
+		plat_test_progress(stage);
+	if (A.opening == 1 && stage >= 1 && stage <= 3)
+		open_poll();
 	if (stage == 4) {
 		if (A.font_loading)
 			spinner_step();
@@ -360,7 +410,7 @@ static void open_progress(int stage, uint32_t done, uint32_t total)
 	pct = from[stage] + (uint32_t)((uint64_t)span[stage] * done / total);
 	if (A.opening == 2)	/* finishing the layout on its own */
 		pct = (uint32_t)((uint64_t)100 * done / total);
-	fill(x - 2, y - 2, w + 4, 38, WHITE);
+	fill(x - 2, y - 2, w + 4, 52, WHITE);
 	gfx_rect(A.fb, SCREEN_STRIDE, SCREEN_H, x, y, w, 8, BLACK);
 	fill(x + 1, y + 1, (int)((w - 2) * pct / 100), 6, BLACK);
 	t[0] = 0;
@@ -372,6 +422,8 @@ static void open_progress(int stage, uint32_t done, uint32_t total)
 	text_centre(SCREEN_W / 2, y + 34, FONT_SMALL,
 		    A.opening == 2 || stage == 3 ? "laying out the page" :
 		    stage == 2 ? "reading the text" : "unpacking from the card", BLACK);
+	if (A.opening == 1)
+		text_centre(SCREEN_W / 2, y + 48, FONT_SMALL, "tap to stop", BLACK);
 	present();
 }
 
@@ -802,11 +854,10 @@ static int open_entry(uint32_t entry, int32_t scroll, int push)
 	doc_t nd;
 	layout_t nl;
 	int r;
-	A.find = 0;	/* find belongs to the page it was opened on */
-	A.find_kb = 0;
 
 	if (!A.have_lib)
 		return ZW_ENOTFOUND;
+	zw_cancel = 0;
 	r = zim_follow(&A.lib.zim, entry, &final, &d);
 	if (!(A.screen == S_ARTICLE && A.have_article))
 		memset(A.fb, 0, sizeof(A.fb));
@@ -833,6 +884,11 @@ static int open_entry(uint32_t entry, int32_t scroll, int push)
 	}
 	if ((r = zim_blob(&A.lib.zim, d.cluster, d.blob, &html, &len)) < 0)
 		goto fail;
+	open_poll();
+	if (zw_cancel) {
+		r = ZW_ECANCEL;
+		goto fail;
+	}
 	{
 		/* now the size is known: "Opening… (1.3 MB)" */
 		char head[40];
@@ -844,7 +900,10 @@ static int open_entry(uint32_t entry, int32_t scroll, int push)
 	}
 	doc_init(&nd);
 	if ((r = html_to_doc(&nd, (const char *)html, len, d.ns, d.url,
-			     A.lib.zim.content_ns == 'C')) < 0) {
+			     A.lib.zim.content_ns == 'C')) < 0 ||
+	    (open_poll(), zw_cancel)) {
+		if (r >= 0)
+			r = ZW_ECANCEL;
 		doc_free(&nd);
 		goto fail;
 	}
@@ -869,12 +928,17 @@ static int open_entry(uint32_t entry, int32_t scroll, int push)
 	/* lay out just enough to show the page; the rest follows in idle
 	 * time (a long book takes many seconds to lay out in full) */
 	if ((r = lay_begin(&nl, &nd)) < 0 ||
-	    (r = lay_more(&nl, (scroll > 0 ? scroll : 0) + 3 * SCREEN_H, 0)) < 0) {
+	    (r = lay_more(&nl, (scroll > 0 ? scroll : 0) + 3 * SCREEN_H, 0)) < 0 ||
+	    (open_poll(), zw_cancel)) {
+		if (r >= 0)
+			r = ZW_ECANCEL;
 		lay_free(&nl);
 		doc_free(&nd);
 		goto fail;
 	}
 	A.opening = 0;
+	A.find = 0;	/* find belongs to the page it was opened on */
+	A.find_kb = 0;
 	/* success: remember where we came from, retire the old article */
 	if (push)
 		push_current();
@@ -903,6 +967,14 @@ static int open_entry(uint32_t entry, int32_t scroll, int push)
 	return ZW_OK;
 fail:
 	A.opening = 0;
+	if (r == ZW_ECANCEL) {
+		/* stopped by the reader: stay where we were (the old article
+		 * is untouched until a new one is complete) */
+		zw_cancel = 0;
+		zw_log("open_entry %u stopped", (unsigned)entry);
+		A.need_draw = 1;
+		return r;
+	}
 	zw_log("open_entry %u failed (%d)", (unsigned)entry, r);
 	error_message("This article could not be opened.", r);
 	return r;
@@ -944,8 +1016,8 @@ static void go_back(void)
 			if (A.scroll > max_scroll())
 				A.scroll = max_scroll();
 			A.screen = S_ARTICLE;
-		} else {
-			open_entry(A.back[A.nback].entry, A.back[A.nback].scroll, 0);
+		} else if (open_entry(A.back[A.nback].entry, A.back[A.nback].scroll, 0) == ZW_ECANCEL) {
+			A.nback++;	/* stopped: Back can try it again */
 		}
 		break;
 	case BI_SEARCH:
@@ -3170,6 +3242,18 @@ void app_event(const void *ev)
 {
 	const plat_event_t *e = ev;
 	A.last_input = plat_ms();
+	/* the rest of the tap or press that stopped an opening */
+	if (A.eat_touch && (e->type == PE_TOUCH_MOVE || e->type == PE_TOUCH_UP)) {
+		if (e->type == PE_TOUCH_UP)
+			A.eat_touch = 0;
+		return;
+	}
+	if (e->type == PE_TOUCH_DOWN)
+		A.eat_touch = 0;	/* its release was lost: a new touch */
+	if (e->type == PE_BUTTON_UP && (A.eat_buttons & (1u << (e->code & 7)))) {
+		A.eat_buttons &= (uint8_t)~(1u << (e->code & 7));
+		return;
+	}
 	/* safe mode: the SEARCH that was held at power on (grifo reports it
 	 * as a press) must not dismiss the message or start anything */
 	if (A.safe_swallow && e->code == BTN_SEARCH &&
@@ -3545,8 +3629,17 @@ static void restore_state(void)
 			A.kb_visible = 1;
 			A.search_dirty = 1;
 			if (buf[13] == S_ARTICLE && entry != 0xffffffffu &&
-			    entry < A.lib.zim.entry_count)
-				open_entry(entry, scroll, 0);
+			    entry < A.lib.zim.entry_count &&
+			    open_entry(entry, scroll, 0) == ZW_ECANCEL) {
+				/* stopped at start: an empty search, saved so the
+				 * next start does not try that page again */
+				A.query[0] = 0;
+				A.qlen = 0;
+				A.screen = S_SEARCH;
+				A.kb_visible = 1;
+				A.search_dirty = 1;
+				A.state_dirty = 1;
+			}
 		}
 		zw_free(buf);
 	} else if (A.nlibs == 1) {
@@ -3575,6 +3668,7 @@ static int load_fallback_font(void)
 		zw_free(font);
 		return -1;
 	}
+	zw_log("WIKIFONT.BIN loaded (%u bytes)", (unsigned)flen);
 	return 0;
 }
 
@@ -3626,7 +3720,13 @@ int app_main(void)
 	while (!A.quit) {
 		int got;
 		tick();
-		got = plat_poll(&e);
+		if (A.deferred_at < A.ndeferred) {
+			e = A.deferred[A.deferred_at++];
+			got = 1;
+		} else {
+			A.ndeferred = A.deferred_at = 0;
+			got = plat_poll(&e);
+		}
 		if (!got) {
 			uint32_t t0 = plat_ms();
 			int w = idle_work();

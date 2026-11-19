@@ -171,6 +171,29 @@ static int is_html(zim_t *z, uint16_t mime)
 	return mime < z->nmime && strncmp(z->mime[mime], "text/html", 9) == 0;
 }
 
+/* the .IDX size write_index will produce (same packing and duplicate
+ * rule), so a source too big for the 32-bit offsets fails before the
+ * slow steps rather than after them */
+static uint64_t index_bytes(void)
+{
+	uint64_t pages = 0, off = 0, sum;
+	size_t i;
+	for (i = 0; i < nrec; ++i) {
+		const rec_t *r = &recs[i];
+		uint64_t need = IDX_REC_HDR + r->tlen;
+		if (i && strcmp(keys.p + r->key, keys.p + recs[i - 1].key) == 0 &&
+		    r->target == recs[i - 1].target)
+			continue;
+		if (off == 0 || off + need > IDX_PAGE) {
+			pages++;
+			off = 0;
+		}
+		off += need;
+	}
+	sum = (pages + IDX_STRIDE - 1) / IDX_STRIDE;
+	return (pages + 1) * IDX_PAGE + pages * IDX_TOP + sum * IDX_TOP;
+}
+
 static void write_index(zim_t *z, const char *path, const char *name,
 			uint32_t chunks, uint32_t shift, uint64_t zim_size)
 {
@@ -567,6 +590,19 @@ int main(int argc, char **argv)
 	progress("reading titles", z.entry_count, z.entry_count);
 	fprintf(stderr, "sorting %zu titles\n", nrec);
 	qsort(recs, nrec, sizeof(rec_t), rec_cmp);
+	{
+		uint64_t ib = index_bytes(), lim = 0xffffffffu;
+		if (getenv("ZW_IDX_LIMIT"))	/* tests: a lower limit */
+			lim = strtoull(getenv("ZW_IDX_LIMIT"), NULL, 10);
+		if (ib > lim) {
+			fprintf(stderr, "zimprep: the title index would be %.2f GiB; the "
+				"WikiReader's index is limited to 4 GiB (about 145 million "
+				"titles). This ZIM has %zu titles, too many for one wiki.\n",
+				ib / 1073741824.0, nrec);
+			return 1;
+		}
+		fprintf(stderr, "title index: %.1f MiB of the 4096 MiB limit (%llu bytes)\n", ib / 1048576.0, (unsigned long long)ib);
+	}
 
 	if (recluster_kb && !index_only) {
 		uint64_t size;

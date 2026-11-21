@@ -1,6 +1,6 @@
 # zimwiki: ZIM reader firmware for the Openmoko WikiReader
 
-Version 1.0.55 (released as *WikiReader Gen2*). The version and build date
+Version 1.0.57 (released as *WikiReader Gen2*). The version and build date
 are shown at the bottom of the search screen; `zimprep --version` prints
 it for the PC tool.
 
@@ -157,8 +157,9 @@ This writes `MATHS.IDX` (the search index) and `MATHS.Z00`, `MATHS.Z01`...
   page. It uses
   all CPU cores. Kiwix's full text search indexes (Xapian, often several
   GB) are left out, as the WikiReader has its own title index;
-  `--keep-fulltext` keeps them. So are the pictures (and redirects to
-  them), which the WikiReader cannot show: the remaining entries are
+  `--keep-fulltext` keeps them. So are the pictures, and from 1.0.56 the
+  video, audio and subtitle files (and redirects to any of them), which
+  the WikiReader cannot show or play: the remaining entries are
   renumbered, and the ZIM's lists and the WikiReader's index with them.
   Each article's HTML is also **slimmed** to what the WikiReader reads
   (its tags and the few attributes and class names it uses; no styles,
@@ -237,6 +238,14 @@ copied to the card does still open (with a simple, case-sensitive title
 search and slow pages), but the device then has to create those files
 itself, which on a nearly full card can freeze or reset it. It is not
 supported.
+
+### What is in a ZIM
+
+`zimprep --types INPUT.zim` prints one line per MIME type, biggest first:
+the number of entries, an estimated size, and what `--recluster` does with
+it. Anything marked "kept, not used by the WikiReader" is space on the card
+for nothing; large amounts of it (map tiles, PDFs) usually mean the ZIM is
+not one the WikiReader can show.
 
 ## Making a card
 
@@ -516,6 +525,8 @@ now and then, or grifo's watchdog resets the unit after 20 s.
 * 1.0.48: Pictures use Atkinson dithering: cleaner maps and diagrams (white stays white), clearer shapes in photos, and 8 to 11% smaller picture files; it loses some pale shading, so `--dither fs` keeps the old Floyd-Steinberg. Re-run `--add-pictures` to convert a wiki's pictures again. zimprep makes any missing folders in OUTDIR (like mkdir -p) and checks it before reading the ZIM, instead of failing after the title list. slimcheck shows its progress. The card's README.txt covers the calculator, Large text and Pictures. Releases now come as one zip for the card (kernel.elf, init.app, WIKIFONT.BIN, ZWSTATE.DAT, README.txt and the source) plus the source tarball.
 * 1.0.49: `--add-pictures` ran on one thread unless given `--threads` (the default, all CPUs, was worked out after it branched off); it now uses all CPUs and says how many. The slimming line prints GB for big wikis. Figures from the full English Wikipedia (2026-08 maxi, 32 threads, 1.0.47): reclustering 37 min (was 107), the whole text step 39 min (was 1 h 50), HTML 531.6 GB slimmed to 145.6 GB, ZIM pieces 29.6 GB (were 74.0).
 * 1.0.50: Safe mode: hold SEARCH while switching on (until the message) when it crashes or freezes at every start. It clears ZWSTATE.DAT (the page it reopens, the settings, the calculator's Ans), makes the wiki's file map again for that start, and keeps the history; the SEARCH press itself is ignored. The app reads the buttons straight from port P6 at start (one button held is fine with the boot loader; several open its menu). c33emu and zimwiki-headless take ZW_HELD=search to test it; tested on both. zimprep no longer prints "finding pictures 100%" twice.
+* 1.0.57: `zimprep --types INPUT.zim` lists what a ZIM holds by MIME type (entries and estimated size, biggest first) and what --recluster does with each: kept as articles or title lists, left out (pictures, video, audio, subtitles, the full text index), or kept but not used by the WikiReader, which is where any other dead weight shows up (map tiles, PDFs, scripts). It reads only the directory and the cluster list, so it takes seconds even for a 100 GB ZIM. Only zimprep changed.
+* 1.0.56: zimprep --recluster also leaves out video, audio and subtitle files (video/*, audio/*, application/ogg, text/vtt) and redirects to them, as it already did pictures. The WikiReader never showed them (the HTML converter skips video, audio, source and track), but they stayed in the .Z files: a "top 100" Wikipedia ZIM gave 282 MB of which 269 MB was WebM video and 10 MB Ogg audio, for about 5 MB of text. zimprep reports how many it left out. `--add-pictures` still accepts a wiki made by zimprep 1.0.55 or older (media kept) by trying the old numbering too. Only zimprep changed (init.app only by its version number). The test ZIM gains a video, an audio file and subtitles on the Cattle page.
 * 1.0.55: Favourites remember where you were: leave a favourite anywhere and it reopens there, without starring it again (Section and Top still take you up). History and Favourites both keep each article's address (URL) as well as its number, so after a rebuild or a newer wiki an item is found again by address (at the top, as its old place means nothing now), and one no longer in the wiki is removed when tapped, with a message saying so. The addresses and positions are stored after the old data in NAME.HIS and NAME.FAV, so older versions still read both files. One history item per article (a rebuilt wiki could otherwise show an article twice). WIKIFONT.BIN loading shows "Loading Unicode font" beside the spinner.
 * 1.0.54: Favourites. Tap an article to show its toolbar and a star appears at the top centre: tap it to make the article a favourite (solid) or not (outline); the toolbar stays up to show the change. Hold HISTORY for the list, which now has History and Favourites tabs (the last one used is remembered). Newest first; unstar and star again to move one to the top; up to 100 per wiki, never pushed out. Each favourite keeps its title and its address (URL) as well as its entry number, and is found by address if the number no longer matches (a rebuilt or newer wiki); one no longer in the wiki gives a message. Saved in NAME.FAV next to NAME.HIS, which zimprep now makes (32 KB of zeros), so the device never creates a file. Favourites are only on for a wiki that has NAME.FAV: wikis from older zimprep runs behave exactly as before (make one with `head -c 32768 /dev/zero > NAME.FAV` to switch them on).
 * 1.0.53: Tap to stop: a tap on the screen or a button press while a page is opening stops it, from any route (a link, a result, RANDOM, History, Back, or the page reopened at start). You stay where you were: the old article is only replaced once the new one is complete, Back keeps its step, and nothing is added to history. Stopped at start, you get an empty search and the saved state says so, so the next start does not try the page again (this covers a page that is only slow; safe mode is still there for one that crashes). "tap to stop" is shown under the Opening bar. How: the progress callback the unpacking, HTML and layout loops already call polls for input while opening and sets zw_cancel; each loop returns ZW_ECANCEL at its next report, with checks between the stages too. The stopping touch or press is used up, release included, and other input is kept for after. The WIKIFONT.BIN load is never interrupted (it reports a different stage, which does not poll); a tap during it stops the opening just after, with the font loaded and kept. Tests: "stopat N" in PC scripts and ZW_STOP_STAGE (tap during stage N), "tap2" and ZW_EARLY_TAP in c33emu; the test ZIM gains a 390 KB page and one in Chinese and Japanese.

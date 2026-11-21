@@ -484,10 +484,145 @@ static uint8_t *title_list(zim_t *z)
 	return tl;
 }
 
-uint32_t *image_map(zim_t *z, uint32_t *out_entries, uint32_t *out_pics, uint32_t *out_redirs)
+/* what the WikiReader cannot use and --recluster leaves out: pictures
+ * (--pictures makes its own) and, from 1.0.56, video and audio with
+ * their subtitles (html.c skips <video>, <audio>, <source>, <track>).
+ * media = 0 gives the 1.0.55 rule (pictures only), so --add-pictures
+ * still matches a wiki made by an older zimprep */
+static int dropped_mime(const zim_t *z, uint16_t mime, int media)
+{
+	if (mime_is(z, mime, "image/"))
+		return 1;
+	return media && (mime_is(z, mime, "video/") || mime_is(z, mime, "audio/") ||
+			 mime_is(z, mime, "application/ogg") || mime_is(z, mime, "text/vtt"));
+}
+
+/* zimprep --types: what a ZIM holds, by MIME type, and what --recluster
+ * does with each.  Sizes are each cluster's compressed size shared
+ * equally between the entries in it (no decompression, so it takes
+ * seconds even for a 100 GB ZIM) */
+typedef struct mime_row {
+	uint32_t entries;
+	double bytes;
+} mime_row_t;
+
+static void human(char *out, size_t cap, double b)
+{
+	if (b >= 1e9)
+		snprintf(out, cap, "%.2f GB", b / 1e9);
+	else if (b >= 1e6)
+		snprintf(out, cap, "%.1f MB", b / 1e6);
+	else
+		snprintf(out, cap, "%.0f KB", b / 1e3);
+}
+
+static mime_row_t *sort_rows;
+static int row_cmp1(const void *a, const void *b)	/* biggest first */
+{
+	double x = sort_rows[*(const uint16_t *)a].bytes, y = sort_rows[*(const uint16_t *)b].bytes;
+	return x < y ? 1 : x > y ? -1 : 0;
+}
+
+int mime_report(zim_t *z)
+{
+	uint32_t *per_cluster = calloc(z->cluster_count ? z->cluster_count : 1, sizeof(uint32_t));
+	uint64_t *csize = calloc(z->cluster_count ? z->cluster_count : 1, sizeof(uint64_t));
+	mime_row_t rows[ZIM_MAX_MIME + 1];
+	uint16_t order[ZIM_MAX_MIME + 1];
+	uint32_t i, redirects = 0, search = 0, n = 0;
+	double search_bytes = 0, total = 0;
+	uint8_t b[8];
+	uint64_t prev = 0;
+	if (!per_cluster || !csize)
+		return -1;
+	memset(rows, 0, sizeof(rows));
+	/* compressed size of each cluster, from the cluster pointer list */
+	for (i = 0; i <= z->cluster_count; ++i) {
+		uint64_t off;
+		if (i < z->cluster_count) {
+			if (zw_io_read(&z->io, z->cluster_ptr_pos + (uint64_t)i * 8, b, 8) < 0)
+				return -1;
+			off = zw_rd64(b);
+		} else {
+			off = z->checksum_pos ? z->checksum_pos : z->io.size;
+		}
+		if (i)
+			csize[i - 1] = off > prev ? off - prev : 0;
+		prev = off;
+		if (i % 65536 == 0 || i == z->cluster_count)
+			progress("reading cluster sizes", i, z->cluster_count);
+	}
+	for (i = 0; i < z->entry_count; ++i) {
+		zim_dirent_t d;
+		if (zim_dirent(z, i, &d) == 0 && d.cluster < z->cluster_count)
+			per_cluster[d.cluster]++;
+		if (i % 65536 == 0)
+			progress("reading entries (1 of 2)", i, z->entry_count);
+	}
+	progress("reading entries (1 of 2)", z->entry_count, z->entry_count);
+	for (i = 0; i < z->entry_count; ++i) {
+		zim_dirent_t d;
+		if (i % 65536 == 0)
+			progress("reading entries (2 of 2)", i, z->entry_count);
+		if (zim_dirent(z, i, &d) < 0)
+			continue;
+		if (d.mime == ZIM_MIME_REDIRECT || d.mime == ZIM_MIME_LINKTARGET || d.mime == ZIM_MIME_DELETED) {
+			redirects++;
+			continue;
+		}
+		if (d.cluster >= z->cluster_count || !per_cluster[d.cluster])
+			continue;
+		if (is_search_index(&d)) {
+			search++;
+			search_bytes += (double)csize[d.cluster] / per_cluster[d.cluster];
+		} else if (d.mime < z->nmime) {
+			rows[d.mime].entries++;
+			rows[d.mime].bytes += (double)csize[d.cluster] / per_cluster[d.cluster];
+		}
+	}
+	progress("reading entries (2 of 2)", z->entry_count, z->entry_count);
+	for (i = 0; i < z->nmime; ++i)
+		if (rows[i].entries)
+			order[n++] = (uint16_t)i;
+	sort_rows = rows;
+	qsort(order, n, sizeof(order[0]), row_cmp1);
+	printf("%-44s %10s %12s  %s\n", "MIME type", "entries", "size (est.)", "--recluster");
+	for (i = 0; i < n; ++i) {
+		uint16_t m = order[i];
+		const char *what = !strncmp(z->mime[m], "text/html", 9) ? "kept: articles" :
+				   is_listing(z, m) ? "kept: title lists" :
+				   mime_is(z, m, "image/") ? "left out (--pictures makes its own)" :
+				   dropped_mime(z, m, 1) ? "left out (cannot be played)" :
+				   "kept, not used by the WikiReader";
+		char sz[24];
+		human(sz, sizeof(sz), rows[m].bytes);
+		printf("%-44.44s %10u %12s  %s\n", z->mime[m], rows[m].entries, sz, what);
+		total += rows[m].bytes;
+	}
+	if (search) {
+		char sz[24];
+		human(sz, sizeof(sz), search_bytes);
+		printf("%-44s %10u %12s  %s\n", "Kiwix full text search index", search,
+		       sz, "left out (unless --keep-fulltext)");
+	}
+	printf("%-44s %10u %12s  %s\n", "redirects", redirects, "", "kept (except to left-out entries)");
+	{
+		char sz[24];
+		human(sz, sizeof(sz), total + search_bytes);
+		printf("total %s of clusters (sizes are estimates: each cluster's compressed size\n"
+		       "shared equally by the entries in it)\n", sz);
+	}
+	free(per_cluster);
+	free(csize);
+	return 0;
+}
+
+uint32_t *image_map(zim_t *z, uint32_t *out_entries, uint32_t *out_pics, uint32_t *out_redirs,
+		    int media, uint32_t *out_media)
 {
 	uint32_t i, next = 0, npics = 0, npicredir = 0;
 	uint32_t *map = malloc(sizeof(uint32_t) * (z->entry_count ? z->entry_count : 1));
+	uint32_t nmedia = 0;
 	for (i = 0; i < z->entry_count; ++i) {
 		zim_dirent_t d;
 		map[i] = 0;
@@ -495,9 +630,12 @@ uint32_t *image_map(zim_t *z, uint32_t *out_entries, uint32_t *out_pics, uint32_
 		 * metadata (the Kiwix icon, M/Illustration...) stays */
 		if (zim_dirent(z, i, &d) == 0 && d.ns != 'M' &&
 		    d.mime != ZIM_MIME_REDIRECT && d.mime != ZIM_MIME_LINKTARGET &&
-		    d.mime != ZIM_MIME_DELETED && mime_is(z, d.mime, "image/")) {
+		    d.mime != ZIM_MIME_DELETED && dropped_mime(z, d.mime, media)) {
 			map[i] = ZIM_NONE;
-			npics++;
+			if (mime_is(z, d.mime, "image/"))
+				npics++;
+			else
+				nmedia++;
 		}
 	}
 	for (i = 0; i < z->entry_count; ++i) {
@@ -517,7 +655,9 @@ uint32_t *image_map(zim_t *z, uint32_t *out_entries, uint32_t *out_pics, uint32_
 		*out_pics = npics;
 	if (out_redirs)
 		*out_redirs = npicredir;
-	if (!npics && !npicredir) {
+	if (out_media)
+		*out_media = nmedia;
+	if (!npics && !npicredir && !nmedia) {
 		free(map);
 		map = NULL;
 	}
@@ -530,7 +670,7 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 {
 	uint32_t dropped = 0;
 	uint32_t *map = NULL;		/* old entry -> new, ZIM_NONE: left out */
-	uint32_t nentries = z->entry_count, npics = 0, npicredir = 0;
+	uint32_t nentries = z->entry_count, npics = 0, npicredir = 0, nmedia = 0;
 	uint8_t *listing = NULL;	/* per entry: a title listing blob */
 	uint8_t *titles;		/* the title pointer list (old numbers) */
 	cw_t w;
@@ -567,7 +707,7 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 	 * WikiReader cannot use them: --pictures makes its own); the rest are renumbered in order,
 	 * which keeps the URL order the ZIM format requires */
 	if (!keep_images)
-		map = image_map(z, &nentries, &npics, &npicredir);
+		map = image_map(z, &nentries, &npics, &npicredir, 1, &nmedia);
 
 	/* 1. which entries use which blob, in cluster order */
 	for (i = 0; i < z->entry_count; ++i) {
@@ -834,6 +974,10 @@ int recluster(zim_t *z, const char *base, uint32_t shift, uint32_t target_kb, in
 		fprintf(stderr, "left out the original pictures from the .Z files: %u picture%s and %u redirect%s to them "
 			"(the WikiReader cannot use them; --pictures makes its own black and white copies, in the .P files)\n",
 			npics, npics == 1 ? "" : "s", npicredir, npicredir == 1 ? "" : "s");
+
+	if (nmedia)
+		fprintf(stderr, "left out %u video, audio and subtitle file%s (the WikiReader cannot play them)\n",
+			nmedia, nmedia == 1 ? "" : "s");
 
 	/* 3. assemble: header, MIME list, pointer lists, dirents,
 	 * cluster pointers, clusters, checksum */

@@ -7,7 +7,7 @@ percent encoded names, lazy loading, <noscript> copy, PNG and JPEG, a
 picture shared by two articles, a sub-page, a picture far down a long
 page), with pictures taken from SOURCE (the climate change test ZIM).
 """
-import io, sys
+import io, random, sys
 from libzim.reader import Archive
 from libzim.writer import Creator, Item, StringProvider, Hint
 from PIL import Image
@@ -72,7 +72,9 @@ b = io.BytesIO(); Image.new('RGB', (16, 11), (200, 0, 0)).save(b, 'WEBP'); ICON_
 pages = [
     ('Cattle', 'Cattle',
      infobox('./' + COW, 220, 147, 'A Fleckvieh cow') + para(3) + MATH + ICON +
-     '<p>More about cattle and fields.</p>' + figure(BAMBOO, 'Bamboo, for no reason') + para(3)),
+     '<p>More about cattle and fields.</p>' + figure(BAMBOO, 'Bamboo, for no reason') + para(3) +
+     '<video controls><source src="./Cattle_moo.webm" type="video/webm">'
+     '<track src="./Cattle_moo.en.vtt" kind="subtitles"></video><audio src="./Cattle_moo.ogg"></audio>'),
     ('Gujarat_work', 'Gujarat work',
      para(1, 'work') + figure('./Woman_at_work%252C_Gujarat.jpg.webp', 'A woman at work') + para(2, 'work')),
     ('Bamboo', 'Bamboo',
@@ -105,6 +107,13 @@ with Creator(sys.argv[2]).config_indexing(False, 'eng').config_clustersize(64 * 
     c.add_redirection('Cow', 'Cow', 'Cattle', {Hint.FRONT_ARTICLE: True})
     for name in (COW, BAMBOO, TURBO, WOMAN, MAP, LAMB):
         c.add_item(Pic(name, pic(name), 'image/webp'))
+    # video, audio and subtitles: the WikiReader cannot play them and
+    # --recluster leaves them out (300 KB of random bytes, so the size
+    # shows if they are kept)
+    rnd = random.Random(7)
+    c.add_item(Pic('Cattle_moo.webm', bytes(rnd.getrandbits(8) for _ in range(300000)), 'video/webm'))
+    c.add_item(Pic('Cattle_moo.ogg', bytes(rnd.getrandbits(8) for _ in range(50000)), 'audio/ogg'))
+    c.add_item(Pic('Cattle_moo.en.vtt', b'WEBVTT\n\n00:00.000 --> 00:01.000\nMoo\n', 'text/vtt'))
     c.add_item(Pic('Lamb_meat.png', LAMB_PNG, 'image/png'))
     c.add_item(Pic('Lamb_meat.jpg', LAMB_JPG, 'image/jpeg'))
     c.add_item(Pic('Flag_icon.webp', ICON_WEBP, 'image/webp'))

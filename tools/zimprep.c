@@ -6,6 +6,8 @@
  *   -n NAME       base name on the card, 1-8 letters/digits (default WIKI)
  *   --chunk-mb N  chunk size in MiB, power of two, max 2048 (default 2048)
  *   --index-only  write NAME.IDX only (chunks already on the card)
+ *   --types       zimprep --types INPUT.zim: entries and size by MIME type,
+ *                 and what --recluster keeps (no output folder)
  *   --recluster [KB]  rewrite the ZIM with small clusters (default 64 KiB,
  *                 128 KiB with --no-slim)
  *                 so the WikiReader decompresses far less per article
@@ -397,7 +399,12 @@ static int add_pictures_to(zim_t *z, const char *input, const char *outdir, cons
 			"(made without --recluster, or with --keep-images); the WikiReader does not "
 			"use them\n");
 	} else {
-		map = image_map(z, &n, &npics, NULL);
+		map = image_map(z, &n, &npics, NULL, 1, NULL);
+		if (!map || n != old.entry_count) {
+			/* made by zimprep 1.0.55 or older: video and audio kept */
+			free(map);
+			map = image_map(z, &n, &npics, NULL, 0, NULL);
+		}
 		if (!map || n != old.entry_count)
 			die("%s has a different number of entries than this zimprep would make: "
 			    "made by another version or with other options? Prepare it again", base);
@@ -430,7 +437,7 @@ int main(int argc, char **argv)
 {
 	const char *name = "WIKI", *input = NULL, *outdir = NULL;
 	uint32_t chunk_mb = 2048, shift, chunks, i;
-	int index_only = 0, a, r, level = 19, threads = 0, keep_fulltext = 0, keep_images = 0;
+	int index_only = 0, types = 0, a, r, level = 19, threads = 0, keep_fulltext = 0, keep_images = 0;
 	int pictures = 0, add_pictures = 0, slim = 1;
 	uint32_t recluster_kb = 0, prep_entries = 0;
 	host_files_t in;
@@ -447,6 +454,8 @@ int main(int argc, char **argv)
 			chunk_mb = (uint32_t)atoi(argv[++a]);
 		else if (strcmp(argv[a], "--index-only") == 0)
 			index_only = 1;
+		else if (strcmp(argv[a], "--types") == 0)
+			types = 1;
 		else if (strcmp(argv[a], "--recluster") == 0) {
 			recluster_kb = 1;	/* the default, settled below */
 			if (a + 1 < argc && atoi(argv[a + 1]) > 0)
@@ -498,12 +507,24 @@ int main(int argc, char **argv)
 		else
 			die("unexpected argument %s", argv[a]);
 	}
+	if (types && input && !outdir) {
+		/* zimprep --types INPUT.zim: what it holds and what --recluster
+		 * keeps (no output folder) */
+		if (host_files_open(&in, input) < 0)
+			die("cannot open %s", input);
+		if (zim_open(&z, &in.io) < 0)
+			die("%s is not a ZIM file this tool understands", input);
+		zw_log_enabled = 0;
+		return mime_report(&z) < 0 ? 1 : 0;
+	}
 	if (!input || !outdir) {
 		fprintf(stderr, "usage: zimprep [-n NAME] [--chunk-mb N] [--index-only] [--recluster [KB]] [--level N]\n"
 			"               [--threads N] [--keep-fulltext] [--no-slim] [--pictures lead|all] [--dither fs]\n"
 			"               INPUT.zim OUTDIR\n"
 			"       zimprep [-n NAME] --add-pictures lead|all INPUT.zim OUTDIR\n"
 			"               (adds pictures to the wiki made from INPUT.zim in OUTDIR)\n"
+			"       zimprep --types INPUT.zim\n"
+			"               (what the ZIM holds by MIME type, and what --recluster keeps)\n"
 			"       zimprep --version\n");
 		return 2;
 	}

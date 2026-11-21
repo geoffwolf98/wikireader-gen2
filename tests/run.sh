@@ -401,8 +401,18 @@ PY
 			&& ok "pictures made: $m" || { bad "pictures made: $m"; cat "$P/$m.log"; }
 	done
 	rm -rf "$P/none"
-	$B/zimprep --recluster 64 --level 3 "$P/pictest.zim" "$P/none" > /dev/null 2>&1
+	$B/zimprep --recluster 64 --level 3 "$P/pictest.zim" "$P/none" > "$P/none.log" 2>&1
 	[ ! -e "$P/none/WIKI.P00" ] && ok "no pictures unless asked" || bad "no pictures unless asked"
+	# video, audio and subtitles are left out too (350 KB of them in the
+	# test ZIM; the device cannot play them)
+	grep -q "left out 3 video, audio and subtitle files" "$P/none.log" &&
+	! grep -q "Cattle_moo" "$P/none/WIKI.Z00" && [ "$(stat -c %s "$P/none/WIKI.Z00")" -lt 300000 ] \
+		&& ok "video and audio left out" || { bad "video and audio left out"; cat "$P/none.log"; }
+	# zimprep --types: what a ZIM holds and what --recluster keeps
+	$B/zimprep --types "$P/pictest.zim" > "$P/types.txt" 2>/dev/null &&
+	grep -q "^video/webm .* 1 .*300 KB  left out (cannot be played)" "$P/types.txt" &&
+	grep -q "^text/html .* 10 .* kept: articles" "$P/types.txt" \
+		&& ok "zimprep --types" || { bad "zimprep --types"; cat "$P/types.txt"; }
 	# --add-pictures: the same files as making them with the wiki
 	rm -rf "$P/add" && cp -r "$P/none" "$P/add"
 	$B/zimprep --threads 2 --add-pictures all "$P/pictest.zim" "$P/add" > "$P/add.log" 2>&1 &&

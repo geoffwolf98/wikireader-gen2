@@ -47,4 +47,18 @@ fi
 # always use the one from this source, so a new font is never missed
 mkdir -p "$STATE"
 cp "$Z/WIKIFONT.BIN" "$STATE/"
+# favourites are on for a wiki that has NAME.FAV (zimprep makes it); the
+# simulator keeps its own copy, so copy it in once (never over the
+# simulator's saved favourites), and take it away if the wiki has none
+for w in $WIKIS; do
+	W=$(echo "$w" | tr a-z A-Z)	# names on the card are upper case
+	f=$(ls "$S/$w" | grep -i -E '\.fav$' | head -1)
+	if [ -n "$f" ]; then
+		F=$(echo "$f" | tr a-z A-Z)
+		mkdir -p "$STATE/$W"
+		[ -f "$STATE/$W/$F" ] || cp "$S/$w/$f" "$STATE/$W/$F"
+	else
+		rm -f "$STATE/$W/"*.FAV
+	fi
+done
 exec "$Z/build/host/zimwiki-sdl" "$IMG" "$STATE" "${SCALE:-3}"

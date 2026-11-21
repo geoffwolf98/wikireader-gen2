@@ -544,13 +544,46 @@ int mime_report(zim_t *z)
 				return -1;
 			off = zw_rd64(b);
 		} else {
-			off = z->checksum_pos ? z->checksum_pos : z->io.size;
+			off = z->io.size;	/* the last cluster: see below */
 		}
 		if (i)
 			csize[i - 1] = off > prev ? off - prev : 0;
 		prev = off;
 		if (i % 65536 == 0 || i == z->cluster_count)
 			progress("reading cluster sizes", i, z->cluster_count);
+	}
+	/* the last cluster ends where the next part of the file starts: in
+	 * ZIMs written by libzim the directory entries and pointer lists come
+	 * after the clusters (counting them in made the title listing, often
+	 * in the last cluster, look several GB) */
+	if (z->cluster_count) {
+		uint64_t last = 0, end = z->io.size, cand[5];
+		uint8_t buf[8192];
+		uint32_t j, k;
+		if (zw_io_read(&z->io, z->cluster_ptr_pos + (uint64_t)(z->cluster_count - 1) * 8, b, 8) == 0)
+			last = zw_rd64(b);
+		cand[0] = z->url_ptr_pos;
+		cand[1] = z->title_ptr_pos;
+		cand[2] = z->cluster_ptr_pos;
+		cand[3] = z->mime_list_pos;
+		cand[4] = z->checksum_pos;
+		for (k = 0; k < 5; ++k)
+			if (cand[k] > last && cand[k] < end)
+				end = cand[k];
+		for (j = 0; j < z->entry_count; j += 1024) {	/* the dirents */
+			uint32_t m = z->entry_count - j < 1024 ? z->entry_count - j : 1024;
+			if (zw_io_read(&z->io, z->url_ptr_pos + (uint64_t)j * 8, buf, m * 8) < 0)
+				break;
+			for (k = 0; k < m; ++k) {
+				uint64_t o = zw_rd64(buf + k * 8);
+				if (o > last && o < end)
+					end = o;
+			}
+			if (j % (1024 * 64) == 0)
+				progress("reading entry positions", j, z->entry_count);
+		}
+		progress("reading entry positions", z->entry_count, z->entry_count);
+		csize[z->cluster_count - 1] = end - last;
 	}
 	for (i = 0; i < z->entry_count; ++i) {
 		zim_dirent_t d;

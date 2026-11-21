@@ -1,6 +1,6 @@
 # zimwiki: ZIM reader firmware for the Openmoko WikiReader
 
-Version 1.0.53 (released as *WikiReader Gen2*). The version and build date
+Version 1.0.55 (released as *WikiReader Gen2*). The version and build date
 are shown at the bottom of the search screen; `zimprep --version` prints
 it for the PC tool.
 
@@ -230,8 +230,9 @@ Suggested names:
 | Wikiversity | `WIKIVERS` |
 
 **Always prepare wikis with zimprep.** It makes the search index, the
-reclustered ZIM and the two files the WikiReader saves into (`NAME.HIS`,
-`NAME.EXT`), so the device never has to create a file. A plain `NAME.ZIM`
+reclustered ZIM and the files the WikiReader saves into (`NAME.HIS`,
+`NAME.EXT`, and from 1.0.54 `NAME.FAV`), so the device never has to
+create a file. A plain `NAME.ZIM`
 copied to the card does still open (with a simple, case-sensitive title
 search and slow pages), but the device then has to create those files
 itself, which on a nearly full card can freeze or reset it. It is not
@@ -294,6 +295,10 @@ Notes:
   whole card for free space, long enough to freeze or reset the unit), so
   it should only ever overwrite them. For a wiki prepared with an older
   zimprep: `head -c 65536 /dev/zero > NAME.HIS` (and the same for `.EXT`).
+* **Favourites** are on for a wiki only when its `NAME.FAV` is on the card
+  (zimprep 1.0.54 and later makes it: 32 KB of zeros). For a wiki made with
+  an older zimprep: `head -c 32768 /dev/zero > NAME.FAV` in its folder.
+  Without it there is no star and no Favourites tab.
 * **Adding a wiki later**: prepare it with zimprep and copy its folder to
   the card. There is nothing to edit; the app finds wikis by itself at
   start-up.
@@ -317,7 +322,8 @@ Notes:
 | Tap the screen or press a button while a page is opening | **stop** opening it: you stay where you were (the page you were reading, the results, the list); nothing is added to history. When it is the page reopened at start, you get an empty search and the next start does not try it again. A WikiReader font load (WIKIFONT.BIN, for Chinese, Japanese and other scripts) is never cut short: the tap takes effect as soon as it has loaded |
 | SEARCH held from the WikiReader logo until the message (held earlier, the boot loader opens its contrast menu) | **safe mode**: forgets the page it would reopen and the settings, and makes the wiki's file map again; history is kept. For when it crashes at start |
 | HISTORY button, short press | **Back**, like a browser: the results or list you came from, or the article you followed a link from |
-| HISTORY button, hold ½ s | list of recently read articles |
+| HISTORY button, hold ½ s | list of recently read articles; with favourites on, *History* and *Favourites* tabs on its bar (the last one used is remembered) |
+| Star at the top (shows with the toolbar) | **favourite**: tap to make the article a favourite (solid star) or not (outline). Favourites are newest first and reopen where you left them; to move one back to the top, tap the star off and on again. Up to 100 per wiki, kept in `NAME.FAV`, never pushed out like history. A favourite is found by its address if the wiki has been rebuilt, and removed (with a message) if it is no longer in it |
 | RANDOM button | random article (on release; in the calculator: back to where you were) |
 | RANDOM button, hold ½ s | **calculator** (hold again, or press RANDOM, SEARCH or HISTORY, to leave). Tabs at the top: Simple, Sci |
 | Tap the bottom left corner of an article | Back (as on the original WikiReader) |
@@ -510,6 +516,8 @@ now and then, or grifo's watchdog resets the unit after 20 s.
 * 1.0.48: Pictures use Atkinson dithering: cleaner maps and diagrams (white stays white), clearer shapes in photos, and 8 to 11% smaller picture files; it loses some pale shading, so `--dither fs` keeps the old Floyd-Steinberg. Re-run `--add-pictures` to convert a wiki's pictures again. zimprep makes any missing folders in OUTDIR (like mkdir -p) and checks it before reading the ZIM, instead of failing after the title list. slimcheck shows its progress. The card's README.txt covers the calculator, Large text and Pictures. Releases now come as one zip for the card (kernel.elf, init.app, WIKIFONT.BIN, ZWSTATE.DAT, README.txt and the source) plus the source tarball.
 * 1.0.49: `--add-pictures` ran on one thread unless given `--threads` (the default, all CPUs, was worked out after it branched off); it now uses all CPUs and says how many. The slimming line prints GB for big wikis. Figures from the full English Wikipedia (2026-08 maxi, 32 threads, 1.0.47): reclustering 37 min (was 107), the whole text step 39 min (was 1 h 50), HTML 531.6 GB slimmed to 145.6 GB, ZIM pieces 29.6 GB (were 74.0).
 * 1.0.50: Safe mode: hold SEARCH while switching on (until the message) when it crashes or freezes at every start. It clears ZWSTATE.DAT (the page it reopens, the settings, the calculator's Ans), makes the wiki's file map again for that start, and keeps the history; the SEARCH press itself is ignored. The app reads the buttons straight from port P6 at start (one button held is fine with the boot loader; several open its menu). c33emu and zimwiki-headless take ZW_HELD=search to test it; tested on both. zimprep no longer prints "finding pictures 100%" twice.
+* 1.0.55: Favourites remember where you were: leave a favourite anywhere and it reopens there, without starring it again (Section and Top still take you up). History and Favourites both keep each article's address (URL) as well as its number, so after a rebuild or a newer wiki an item is found again by address (at the top, as its old place means nothing now), and one no longer in the wiki is removed when tapped, with a message saying so. The addresses and positions are stored after the old data in NAME.HIS and NAME.FAV, so older versions still read both files. One history item per article (a rebuilt wiki could otherwise show an article twice). WIKIFONT.BIN loading shows "Loading Unicode font" beside the spinner.
+* 1.0.54: Favourites. Tap an article to show its toolbar and a star appears at the top centre: tap it to make the article a favourite (solid) or not (outline); the toolbar stays up to show the change. Hold HISTORY for the list, which now has History and Favourites tabs (the last one used is remembered). Newest first; unstar and star again to move one to the top; up to 100 per wiki, never pushed out. Each favourite keeps its title and its address (URL) as well as its entry number, and is found by address if the number no longer matches (a rebuilt or newer wiki); one no longer in the wiki gives a message. Saved in NAME.FAV next to NAME.HIS, which zimprep now makes (32 KB of zeros), so the device never creates a file. Favourites are only on for a wiki that has NAME.FAV: wikis from older zimprep runs behave exactly as before (make one with `head -c 32768 /dev/zero > NAME.FAV` to switch them on).
 * 1.0.53: Tap to stop: a tap on the screen or a button press while a page is opening stops it, from any route (a link, a result, RANDOM, History, Back, or the page reopened at start). You stay where you were: the old article is only replaced once the new one is complete, Back keeps its step, and nothing is added to history. Stopped at start, you get an empty search and the saved state says so, so the next start does not try the page again (this covers a page that is only slow; safe mode is still there for one that crashes). "tap to stop" is shown under the Opening bar. How: the progress callback the unpacking, HTML and layout loops already call polls for input while opening and sets zw_cancel; each loop returns ZW_ECANCEL at its next report, with checks between the stages too. The stopping touch or press is used up, release included, and other input is kept for after. The WIKIFONT.BIN load is never interrupted (it reports a different stage, which does not poll); a tap during it stops the opening just after, with the font loaded and kept. Tests: "stopat N" in PC scripts and ZW_STOP_STAGE (tap during stage N), "tap2" and ZW_EARLY_TAP in c33emu; the test ZIM gains a 390 KB page and one in Chinese and Japanese.
 * 1.0.52: zimprep works out the exact size of the title index right after sorting the titles and stops there, with a clear message, if it would pass the 4 GiB limit (about 145 million titles), instead of failing at the end after the slow reclustering; it prints the size against the limit. Safe mode instructions corrected: hold SEARCH from the WikiReader logo, since held earlier the boot loader opens its contrast menu.
 * 1.0.51: Find in the page: Find in the article toolbar (now six tools). It searches as you type, ignoring case, accents and punctuation like the title search, and matches parts of words. The text is folded as it is read and matched with KMP, keeping only the last few text offsets, so no copy of the article is made: emulated, a search of a 494 KB test article takes well under a tenth of a second per letter (long pages wait for a 0.25 s pause in typing). Only text that is shown counts: a caption hidden with Pictures off does not. The match's line goes a third of the way down the space above the bar, its first letter inverted and a mark in the margin. Drag the page to put the keyboard away; the bar shows the search, ◀ n/m ▶ and ✕; tap the word to type again; tap the page, ✕ or any button to stop. Find opened again in the same article offers the last word (kept in memory only). fold_utf8 and find share one character fold (fold_one). Test scripts gain expectnot; find is tested on the PC and emulated builds.

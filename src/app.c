@@ -32,6 +32,8 @@ static void pcache_clear(void);
 #define FIND_MAX    999	/* matches kept */
 #define MAX_ROWS    10
 #define HIST_MAX    60
+#define FAV_MAX     100	/* favourites, newest first; never pushed out */
+#define HTAB        (A.htab && A.fav_on)	/* showing Favourites */
 #define BACK_MAX    32
 #define SECT_MAX    160
 #define QUERY_MAX   120
@@ -51,7 +53,18 @@ typedef struct hist_item {
 	uint32_t entry;
 	int32_t scroll;
 	char title[80];
+	char ns;		/* the address, to find it again in a rebuilt */
+	char url[128];		/* wiki ("" from an older .HIS: trust entry) */
 } hist_item_t;
+
+typedef struct fav_item {
+	uint32_t entry;
+	int32_t scroll;		/* where you left it */		/* checked against url on opening: a rebuilt
+				   wiki numbers its entries differently */
+	char ns;
+	char title[80];
+	char url[128];		/* "" if it did not fit: trust entry */
+} fav_item_t;
 
 /* one step of "where you came from" */
 enum { BI_ARTICLE, BI_SEARCH, BI_HISTORY };
@@ -121,6 +134,10 @@ static struct app {
 	struct sect { int32_t y; uint8_t level; char title[72]; } sect[SECT_MAX];
 	int nsect, sect_top;
 	int nhist, hist_top, hist_dirty;
+	fav_item_t fav[FAV_MAX];
+	int nfav, fav_dirty;
+	int fav_on;		/* the wiki has NAME.FAV (zimprep makes it): favourites */
+	int htab;		/* the HISTORY list's tab: 0 History, 1 Favourites */
 
 	/* library list */
 	int lib_top;
@@ -318,6 +335,16 @@ static void spinner_step(void)
 	for (i = -4; i <= 4; ++i)
 		gfx_fill(A.spin_buf, SCREEN_STRIDE, SCREEN_H, cx + i * step[A.spin_i & 3][0],
 			 cy + i * step[A.spin_i & 3][1], 2, 2, BLACK);
+	if (A.font_loading) {
+		/* say what the wait is (the first page in a script the
+		 * built-in fonts do not have loads WIKIFONT.BIN, ~2 MB) */
+		static const char lbl[] = "Loading Unicode font";
+		int tw = font_width(FONT_SMALL, lbl, sizeof(lbl) - 1), lx = x - tw - 8;
+		gfx_fill(A.spin_buf, SCREEN_STRIDE, SCREEN_H, lx, y, tw + 9, h, WHITE);
+		gfx_rect(A.spin_buf, SCREEN_STRIDE, SCREEN_H, lx, y, tw + 9, h, BLACK);
+		font_draw(A.spin_buf, SCREEN_STRIDE, SCREEN_H, lx + 4, y + 11, FONT_SMALL, lbl,
+			  sizeof(lbl) - 1, BLACK);
+	}
 	A.spin_i++;
 	plat_present(A.spin_buf);
 }
@@ -506,6 +533,8 @@ static void error_message(const char *what, int code)
 
 #define STATE_MAGIC 0x54535a57u	/* "WZST" */
 #define HIST_MAGIC  0x48535a57u	/* "WZSH" */
+#define HIST_ADDR_MAGIC 0x41535a57u	/* "WZSA": addresses follow */
+#define FAV_POS_MAGIC   0x50535a57u	/* "WZSP": positions follow */
 
 static void hist_name(char *out)
 {
@@ -519,7 +548,7 @@ static void save_history(void)
 	int i;
 	if (!A.have_lib || !A.hist_dirty)
 		return;
-	buf = zw_alloc(8 + (size_t)A.nhist * (9 + 80));
+	buf = zw_alloc(12 + (size_t)A.nhist * (9 + 80 + 2 + 128));
 	if (!buf)
 		return;
 	zw_wr32(buf, HIST_MAGIC);
@@ -533,6 +562,17 @@ static void save_history(void)
 		memcpy(p + 9, A.hist[i].title, n);
 		p += 9 + n;
 	}
+	/* 1.0.55: the addresses, after the items, where older versions do
+	 * not look (they read the list above and stop) */
+	zw_wr32(p, HIST_ADDR_MAGIC);
+	p += 4;
+	for (i = 0; i < A.nhist; ++i) {
+		uint8_t ul = (uint8_t)strlen(A.hist[i].url);
+		p[0] = (uint8_t)A.hist[i].ns;
+		p[1] = ul;
+		memcpy(p + 2, A.hist[i].url, ul);
+		p += 2 + ul;
+	}
 	hist_name(name);
 	/* clear the flag even when saving failed: retrying at once would
 	 * keep the unit busy (no sleep, no auto power off) for nothing */
@@ -541,6 +581,90 @@ static void save_history(void)
 	A.hist_dirty = 0;
 	zw_free(buf);
 	bd_invalidate();
+}
+
+#define FAV_MAGIC   0x46535a57u	/* "WZSF" */
+
+static void save_favourites(void)
+{
+	uint8_t *buf, *p;
+	char name[32];
+	int i;
+	if (!A.have_lib || !A.fav_dirty || !A.fav_on)
+		return;
+	buf = zw_alloc(12 + (size_t)A.nfav * (7 + 80 + 128 + 4));
+	if (!buf)
+		return;
+	zw_wr32(buf, FAV_MAGIC);
+	zw_wr32(buf + 4, (uint32_t)A.nfav);
+	p = buf + 8;
+	for (i = 0; i < A.nfav; ++i) {
+		uint8_t tl = (uint8_t)strlen(A.fav[i].title), ul = (uint8_t)strlen(A.fav[i].url);
+		zw_wr32(p, A.fav[i].entry);
+		p[4] = (uint8_t)A.fav[i].ns;
+		p[5] = tl;
+		memcpy(p + 6, A.fav[i].title, tl);
+		p += 6 + tl;
+		*p++ = ul;
+		memcpy(p, A.fav[i].url, ul);
+		p += ul;
+	}
+	zw_wr32(p, FAV_POS_MAGIC);	/* 1.0.55: positions, after the list */
+	p += 4;
+	for (i = 0; i < A.nfav; ++i, p += 4)
+		zw_wr32(p, (uint32_t)A.fav[i].scroll);
+	lib_path(&A.lib.info, ".FAV", name);
+	if (plat_save(name, buf, (uint32_t)(p - buf)) != 0)
+		zw_log("favourites not saved");
+	A.fav_dirty = 0;	/* see save_history */
+	zw_free(buf);
+	bd_invalidate();
+}
+
+static void load_favourites(void)
+{
+	uint8_t *buf, *p, *end;
+	uint32_t len, n, i;
+	char name[32];
+	A.nfav = 0;
+	A.fav_dirty = 0;
+	A.fav_on = 0;
+	lib_path(&A.lib.info, ".FAV", name);
+	/* no NAME.FAV (a wiki made before 1.0.54, or left out on purpose):
+	 * no star and no Favourites tab.  zimprep makes it, zero filled,
+	 * so the device never has to create a file (slow on a full card) */
+	if (plat_load(name, &buf, &len) < 0)
+		return;
+	A.fav_on = 1;
+	if (len >= 8 && zw_rd32(buf) == FAV_MAGIC) {
+		n = zw_rd32(buf + 4);
+		p = buf + 8;
+		end = buf + len;
+		for (i = 0; i < n && i < FAV_MAX && p + 7 <= end; ++i) {
+			fav_item_t *f = &A.fav[A.nfav];
+			uint8_t tl = p[5], ul;
+			if (p + 7 + tl > end || tl >= sizeof(f->title))
+				break;
+			ul = p[6 + tl];
+			if (p + 7 + tl + ul > end || ul >= sizeof(f->url))
+				break;
+			f->entry = zw_rd32(p);
+			f->ns = (char)p[4];
+			memcpy(f->title, p + 6, tl);
+			f->title[tl] = 0;
+			memcpy(f->url, p + 7 + tl, ul);
+			f->url[ul] = 0;
+			f->scroll = 0;
+			p += 7 + tl + ul;
+			A.nfav++;
+		}
+		if (i == n && p + 4 <= end && zw_rd32(p) == FAV_POS_MAGIC) {
+			p += 4;
+			for (i = 0; (int)i < A.nfav && p + 4 <= end; ++i, p += 4)
+				A.fav[i].scroll = (int32_t)zw_rd32(p);
+		}
+	}
+	zw_free(buf);
 }
 
 static void load_history(void)
@@ -564,8 +688,22 @@ static void load_history(void)
 			A.hist[i].scroll = (int32_t)zw_rd32(p + 4);
 			memcpy(A.hist[i].title, p + 9, tl);
 			A.hist[i].title[tl] = 0;
+			A.hist[i].ns = 0;
+			A.hist[i].url[0] = 0;
 			p += 9 + tl;
 			A.nhist++;
+		}
+		if (i == n && p + 4 <= end && zw_rd32(p) == HIST_ADDR_MAGIC) {
+			p += 4;
+			for (i = 0; (int)i < A.nhist && p + 2 <= end; ++i) {
+				uint8_t ul = p[1];
+				if (p + 2 + ul > end || ul >= sizeof(A.hist[0].url))
+					break;
+				A.hist[i].ns = (char)p[0];
+				memcpy(A.hist[i].url, p + 2, ul);
+				A.hist[i].url[ul] = 0;
+				p += 2 + ul;
+			}
 		}
 	}
 	zw_free(buf);
@@ -587,6 +725,7 @@ static void save_state(void)
 		buf[13] = (uint8_t)(scr == S_ARTICLE ? S_ARTICLE : S_SEARCH);
 	}
 	buf[14] = (uint8_t)(A.opts | 0x80);	/* switches; 0x80: set */
+	buf[15] = (uint8_t)(A.htab ? 0x81 : 0x80);	/* HISTORY list tab; 0x80: set */
 	zw_wr32(buf + 16, A.have_article ? A.entry : 0xffffffffu);
 	zw_wr32(buf + 20, (uint32_t)A.scroll);
 	buf[24] = (uint8_t)ql;
@@ -609,6 +748,7 @@ static void save_all(void)
 {
 	save_state();
 	save_history();
+	save_favourites();
 	if (A.have_lib)
 		lib_save_extents(&A.lib);
 }
@@ -706,6 +846,7 @@ static int open_library(int i)
 	}
 	lib_save_extents(&A.lib);
 	load_history();
+	load_favourites();
 	A.nback = 0;
 	A.query[0] = 0;
 	A.qlen = 0;
@@ -720,10 +861,18 @@ static int open_library(int i)
 
 static void hist_add(uint32_t entry, const char *title)
 {
-	int i, k = -1;
-	for (i = 0; i < A.nhist; ++i)
-		if (A.hist[i].entry == entry)
-			k = i;
+	int i, j, k = -1;
+	/* one item per article (two could meet after a rebuild, when an old
+	 * item is found again by its address) */
+	for (i = j = 0; i < A.nhist; ++i) {
+		if (A.hist[i].entry == entry) {
+			if (k >= 0)
+				continue;
+			k = j;
+		}
+		A.hist[j++] = A.hist[i];
+	}
+	A.nhist = j;
 	if (k < 0)
 		k = A.nhist < HIST_MAX ? A.nhist++ : HIST_MAX - 1;
 	for (i = k; i > 0; --i)
@@ -739,13 +888,32 @@ static void hist_add(uint32_t entry, const char *title)
 			n--;	/* do not cut a character in half */
 		memcpy(A.hist[0].title, title, n);
 	}
+	{
+		zim_dirent_t d;
+		A.hist[0].ns = 0;
+		A.hist[0].url[0] = 0;
+		if (zim_dirent(&A.lib.zim, entry, &d) == 0 && strlen(d.url) < sizeof(A.hist[0].url)) {
+			A.hist[0].ns = d.ns;
+			strcpy(A.hist[0].url, d.url);
+		}
+	}
 	A.hist_dirty = 1;
 }
 
+static int fav_index(uint32_t entry);
+
+/* where you are in the open article: kept for History and, if it is
+ * one, for Favourites (no need to star it again) */
 static void hist_update_scroll(void)
 {
+	int k;
 	if (A.have_article && A.nhist && A.hist[0].entry == A.entry)
 		A.hist[0].scroll = A.scroll;
+	if (A.have_article && A.fav_on && (k = fav_index(A.entry)) >= 0 &&
+	    A.fav[k].scroll != A.scroll) {
+		A.fav[k].scroll = A.scroll;
+		A.fav_dirty = 1;
+	}
 }
 
 static int32_t max_scroll(void)
@@ -793,6 +961,7 @@ static void push_current(void)
 }
 
 static void build_sections(void);
+static int hlist_count(void);
 static void fetch_rows(void);
 static void jump_to_section(const char *name);
 static int jump_to_anchor(const char *name);
@@ -1034,9 +1203,131 @@ static void go_back(void)
 		break;
 	case BI_HISTORY:
 		A.screen = S_HISTORY;
-		A.hist_top = A.back[A.nback].scroll < A.nhist ? A.back[A.nback].scroll : 0;
+		A.hist_top = A.back[A.nback].scroll < hlist_count() ? A.back[A.nback].scroll : 0;
 		break;
 	}
+}
+
+/* favourites: the star at the top of an article's toolbar */
+static int fav_index(uint32_t entry)
+{
+	int i;
+	for (i = 0; i < A.nfav; ++i)
+		if (A.fav[i].entry == entry)
+			return i;
+	return -1;
+}
+
+static void copy_cut(char *dst, size_t cap, const char *src)
+{
+	size_t n = strlen(src);
+	if (n >= cap)
+		n = cap - 1;
+	while (n && ((unsigned char)src[n] & 0xc0) == 0x80)
+		n--;	/* do not cut a character in half */
+	memcpy(dst, src, n);
+	dst[n] = 0;
+}
+
+/* star the open article (newest first; starring again after unstarring
+ * puts it back at the top), or unstar it */
+static void fav_toggle(void)
+{
+	int i, k;
+	zim_dirent_t d;
+	if (!A.have_article)
+		return;
+	k = fav_index(A.entry);
+	if (k >= 0) {
+		for (i = k; i + 1 < A.nfav; ++i)
+			A.fav[i] = A.fav[i + 1];
+		A.nfav--;
+	} else {
+		if (A.nfav < FAV_MAX)
+			A.nfav++;
+		for (i = A.nfav - 1; i > 0; --i)
+			A.fav[i] = A.fav[i - 1];
+		memset(&A.fav[0], 0, sizeof(A.fav[0]));
+		A.fav[0].entry = A.entry;
+		A.fav[0].scroll = A.scroll;
+		copy_cut(A.fav[0].title, sizeof(A.fav[0].title), A.title);
+		if (zim_dirent(&A.lib.zim, A.entry, &d) == 0 && strlen(d.url) < sizeof(A.fav[0].url)) {
+			A.fav[0].ns = d.ns;
+			strcpy(A.fav[0].url, d.url);
+		}
+	}
+	A.fav_dirty = 1;
+	A.need_draw = 1;
+}
+
+/* a History or Favourites item: still the article it was?  A rebuilt or
+ * newer wiki numbers its entries differently, so the address decides.
+ * 1: found where it was; 0: found elsewhere (*entry changed, the old
+ * position means nothing now); -1: no longer in the wiki */
+static int item_check(uint32_t *entry, char ns, const char *url)
+{
+	zim_dirent_t d;
+	uint32_t idx;
+	if (!url[0])	/* saved before addresses were kept */
+		return *entry < A.lib.zim.entry_count ? 1 : -1;
+	if (*entry < A.lib.zim.entry_count && zim_dirent(&A.lib.zim, *entry, &d) == 0 &&
+	    d.ns == ns && strcmp(d.url, url) == 0)
+		return 1;
+	if (zim_find(&A.lib.zim, ns, url, &idx) < 0)
+		return -1;
+	*entry = idx;
+	return 0;
+}
+
+static void gone_message(const char *list)
+{
+	static char l2[40];
+	static const char *lines[3];
+	snprintf(l2, sizeof(l2), "removed from %s.", list);
+	lines[0] = "Not in this wiki any more:";
+	lines[1] = l2;
+	lines[2] = NULL;
+	set_message(list, lines, S_HISTORY);
+}
+
+/* open favourite i at its place; gone from the wiki: drop it */
+static void fav_open(int i)
+{
+	fav_item_t *f = &A.fav[i];
+	int r = item_check(&f->entry, f->ns, f->url), k;
+	if (r < 0) {
+		for (k = i; k + 1 < A.nfav; ++k)
+			A.fav[k] = A.fav[k + 1];
+		A.nfav--;
+		A.fav_dirty = 1;
+		gone_message("Favourites");
+		return;
+	}
+	if (r == 0) {
+		f->scroll = 0;
+		A.fav_dirty = 1;
+	}
+	open_entry(f->entry, f->scroll, 1);
+}
+
+/* the same for history item i */
+static void hist_open(int i)
+{
+	hist_item_t *h = &A.hist[i];
+	int r = item_check(&h->entry, h->ns, h->url), k;
+	if (r < 0) {
+		for (k = i; k + 1 < A.nhist; ++k)
+			A.hist[k] = A.hist[k + 1];
+		A.nhist--;
+		A.hist_dirty = 1;
+		gone_message("History");
+		return;
+	}
+	if (r == 0) {
+		h->scroll = 0;
+		A.hist_dirty = 1;
+	}
+	open_entry(h->entry, h->scroll, 1);
 }
 
 static void show_history(void)
@@ -2039,6 +2330,25 @@ static void draw_search(void)
 #define TOOLS 6
 static const char *const tool_labels[TOOLS] = { "Back", "List", "Top", "Prev", "Next", "Find" };
 
+/* the favourite star, top centre while the toolbar shows: an outline,
+ * solid when the article is a favourite */
+#define STAR_W 29
+#define STAR_H 21
+static const uint8_t star_solid[16 * 3] = {0x00, 0x80, 0x00, 0x00, 0x80, 0x00, 0x01, 0xc0, 0x00, 0x01, 0xc0, 0x00, 0x03, 0xe0, 0x00, 0xff, 0xff, 0x80, 0x7f, 0xff, 0x00, 0x3f, 0xfe, 0x00, 0x1f, 0xfc, 0x00, 0x0f, 0xf8, 0x00, 0x0f, 0xf8, 0x00, 0x1f, 0xfc, 0x00, 0x1f, 0x7c, 0x00, 0x3c, 0x1e, 0x00, 0x38, 0x0e, 0x00, 0x60, 0x03, 0x00};
+static const uint8_t star_outline[16 * 3] = {0x00, 0x80, 0x00, 0x00, 0x80, 0x00, 0x01, 0x40, 0x00, 0x01, 0x40, 0x00, 0x02, 0x20, 0x00, 0xfe, 0x3f, 0x80, 0x40, 0x01, 0x00, 0x20, 0x02, 0x00, 0x10, 0x04, 0x00, 0x08, 0x08, 0x00, 0x08, 0x08, 0x00, 0x10, 0x84, 0x00, 0x13, 0x64, 0x00, 0x24, 0x12, 0x00, 0x28, 0x0a, 0x00, 0x60, 0x03, 0x00};
+
+static void draw_star(void)
+{
+	int x = (SCREEN_W - STAR_W) / 2;
+	fill(x, 0, STAR_W, STAR_H, WHITE);
+	gfx_fill(A.fb, SCREEN_STRIDE, SCREEN_H, x, 0, 2, STAR_H, BLACK);
+	gfx_fill(A.fb, SCREEN_STRIDE, SCREEN_H, x + STAR_W - 2, 0, 2, STAR_H, BLACK);
+	hline(x, STAR_H - 2, STAR_W);
+	hline(x, STAR_H - 1, STAR_W);
+	gfx_blit(A.fb, SCREEN_STRIDE, SCREEN_H, x + 6, 2,
+		 fav_index(A.entry) >= 0 ? star_solid : star_outline, 17, 16, BLACK);
+}
+
 static void draw_toolbar(void)
 {
 	/* six tools in 40 px each: plain names, no arrows (they no longer
@@ -2319,6 +2629,13 @@ static void relayout_article(int large, int pics)
 			A.hist[j].scroll = j < HIST_MAX && okhist[j] ? mhist[j] :
 					   scale256(A.hist[j].scroll, k);
 		A.hist_dirty = 1;
+		/* favourites like history (the open one is set exactly just
+		 * below, by hist_update_scroll) */
+		for (j = 0; j < A.nfav; ++j)
+			if (A.fav[j].entry != A.entry)
+				A.fav[j].scroll = scale256(A.fav[j].scroll, k);
+		if (A.nfav)
+			A.fav_dirty = 1;
 	}
 	A.scroll = have_off ? new_y : 0;
 	if (A.scroll > max_scroll())
@@ -2662,8 +2979,11 @@ static void draw_article(void)
 		fill(SCREEN_W - 3, 0, 3, SCREEN_H, WHITE);
 		fill(SCREEN_W - 2, y, 2, h, BLACK);
 	}
-	if (A.toolbar)
+	if (A.toolbar) {
 		draw_toolbar();
+		if (A.fav_on)
+			draw_star();
+	}
 }
 
 static void tool_tap(int x)
@@ -2709,6 +3029,11 @@ static void article_tap(int x, int y)
 		tool_tap(x);
 		return;
 	}
+	if (A.toolbar && A.fav_on && y < STAR_H + 8 && x >= (SCREEN_W - STAR_W) / 2 - 10 &&
+	    x < (SCREEN_W + STAR_W) / 2 + 10) {
+		fav_toggle();	/* the toolbar stays, to show the change */
+		return;
+	}
 	/* bottom left corner goes back, as on the original WikiReader */
 	if (x < CORNER && y >= SCREEN_H - CORNER) {
 		go_back();
@@ -2749,21 +3074,52 @@ static int list_rows(void)
 	return (SCREEN_H - BAR_H) / ROW_H;
 }
 
+/* the HISTORY list: History and Favourites tabs on its bar */
+#define TAB_HIST_W 64
+#define TAB_FAV_W  86
+
+static int hlist_count(void)
+{
+	return HTAB ? A.nfav : A.nhist;
+}
+
+static const char *hlist_title(int i)
+{
+	return HTAB ? A.fav[i].title : A.hist[i].title;
+}
+
 static void draw_history(void)
 {
-	int i, y = BAR_H;
+	int i, y = BAR_H, n = hlist_count();
 	memset(A.fb, 0, sizeof(A.fb));
-	draw_list_header("History", A.nhist ? "Clear" : NULL);
-	if (!A.nhist) {
-		text_centre(SCREEN_W / 2, 70, FONT_ITALIC, "Articles you read appear here", BLACK);
+	if (!A.fav_on) {
+		draw_list_header("History", A.nhist ? "Clear" : NULL);
+	} else {
+		/* tabs: the chosen one white */
+		fill(0, 0, SCREEN_W, BAR_H, BLACK);
+		fill(A.htab ? TAB_HIST_W : 0, 2, A.htab ? TAB_FAV_W : TAB_HIST_W, BAR_H - 2, WHITE);
+		text_centre(TAB_HIST_W / 2, 15, FONT_BOLD, "History", A.htab ? WHITE : BLACK);
+		text_centre(TAB_HIST_W + TAB_FAV_W / 2, 15, FONT_BOLD, "Favourites", A.htab ? BLACK : WHITE);
+		if (!A.htab && A.nhist) {
+			int w = font_width(FONT_BOLD, "Clear", 5);
+			text_at(SCREEN_W - w - 6, 15, FONT_BOLD, "Clear", WHITE);
+		}
+	}
+	if (!n) {
+		if (HTAB) {
+			text_centre(SCREEN_W / 2, 70, FONT_ITALIC, "No favourites yet: tap an article,", BLACK);
+			text_centre(SCREEN_W / 2, 88, FONT_ITALIC, "then the star at the top", BLACK);
+		} else {
+			text_centre(SCREEN_W / 2, 70, FONT_ITALIC, "Articles you read appear here", BLACK);
+		}
 		return;
 	}
-	for (i = 0; i < list_rows() && A.hist_top + i < A.nhist; ++i) {
+	for (i = 0; i < list_rows() && A.hist_top + i < n; ++i) {
 		int inv = i == A.pressed_row;
 		if (inv)
 			fill(0, y + i * ROW_H, SCREEN_W, ROW_H, BLACK);
 		text_clip_mid(4, y + i * ROW_H + 14, SCREEN_W - 8, FONT_TEXT,
-			      A.hist[A.hist_top + i].title, inv ? WHITE : BLACK);
+			      hlist_title(A.hist_top + i), inv ? WHITE : BLACK);
 		if (!inv)
 			gfx_dotted(A.fb, SCREEN_STRIDE, SCREEN_H, 0, y + (i + 1) * ROW_H - 1, SCREEN_W);
 	}
@@ -2954,7 +3310,7 @@ static void touch_down(int x, int y)
 	case S_HISTORY:
 		if (y > BAR_H) {
 			int r = (y - BAR_H) / ROW_H;
-			if (A.hist_top + r < A.nhist)
+			if (A.hist_top + r < hlist_count())
 				A.pressed_row = r;
 			A.need_draw = 1;
 		}
@@ -3075,7 +3431,7 @@ static void touch_move(int x, int y)
 		}
 		break;
 	case S_HISTORY:
-		list_drag(dy, &A.hist_top, A.nhist, list_rows());
+		list_drag(dy, &A.hist_top, hlist_count(), list_rows());
 		break;
 	case S_LIBRARY:
 		list_drag(dy, &A.lib_top, A.nlibs, list_rows());
@@ -3201,12 +3557,22 @@ static void touch_up(int x, int y)
 	case S_HISTORY:
 		if (was_drag)
 			return;
-		if (y < BAR_H && x > SCREEN_W - 60 && A.nhist) {
+		if (y < BAR_H && A.fav_on && x < TAB_HIST_W + TAB_FAV_W) {
+			int t = x >= TAB_HIST_W;
+			if (t != A.htab) {
+				A.htab = t;
+				A.hist_top = 0;
+				A.state_dirty = 1;	/* the tab is remembered */
+			}
+		} else if (y < BAR_H && x > SCREEN_W - 60 && !HTAB && A.nhist) {
 			A.nhist = 0;
 			A.hist_dirty = 1;
-		} else if (row >= 0 && A.hist_top + row < A.nhist) {
-			hist_item_t h = A.hist[A.hist_top + row];
-			open_entry(h.entry, h.scroll, 1);
+		} else if (row >= 0 && A.hist_top + row < hlist_count()) {
+			if (HTAB) {
+				fav_open(A.hist_top + row);
+			} else {
+				hist_open(A.hist_top + row);
+			}
 		}
 		return;
 	case S_SECTIONS:
@@ -3496,7 +3862,7 @@ static int idle_work(void)
 			A.need_draw = 1;
 		return 1;
 	}
-	if ((A.state_dirty || A.hist_dirty || (A.have_lib && A.lib.ext_dirty)) &&
+	if ((A.state_dirty || A.hist_dirty || A.fav_dirty || (A.have_lib && A.lib.ext_dirty)) &&
 	    !A.touching && !A.vel && plat_ms() - A.last_input > 2000) {
 		hist_update_scroll();
 		save_all();
@@ -3523,7 +3889,7 @@ int app_awake(void)
 		return 1;
 	if (A.screen == S_ARTICLE && A.have_article && !A.touching && !A.vel && lay_pending(&A.lay))
 		return 1;
-	if ((A.state_dirty || A.hist_dirty || (A.have_lib && A.lib.ext_dirty)) &&
+	if ((A.state_dirty || A.hist_dirty || A.fav_dirty || (A.have_lib && A.lib.ext_dirty)) &&
 	    A.have_lib && !A.touching)
 		return 1;
 	return 0;
@@ -3598,6 +3964,8 @@ static void restore_state(void)
 		}
 		if (len >= 25 && zw_rd32(buf) == STATE_MAGIC && (buf[14] & 0x80)) {
 			A.opts = buf[14] & (HTML_NOTES | HTML_CITES | HTML_LARGE | OPT_NOPICS);
+			if (buf[15] & 0x80)
+				A.htab = buf[15] & 1;
 			html_set_options(A.opts);
 			lay_set_large((A.opts & HTML_LARGE) != 0);
 			lay_set_pictures(!(A.opts & OPT_NOPICS));
@@ -3737,7 +4105,7 @@ int app_main(void)
 				continue;	/* keep polling while something moves */
 			/* like the original firmware: stay awake until pending
 			 * state has been saved (sleep would postpone it) */
-			if ((A.state_dirty || A.hist_dirty || (A.have_lib && A.lib.ext_dirty)) &&
+			if ((A.state_dirty || A.hist_dirty || A.fav_dirty || (A.have_lib && A.lib.ext_dirty)) &&
 			    A.have_lib && !A.touching)
 				continue;
 			got = plat_wait(&e);
@@ -3786,6 +4154,8 @@ void app_describe(char *out, int cap)
 				     A.title, (int)A.scroll, (int)max_scroll(), A.nback, (unsigned)np,
 				     np && !A.lay.pics ? " hidden" : "",
 				     lay_pending(&A.lay) ? " picwait" : "");
+			if (fav_index(A.entry) >= 0 && n > 0 && n < (int)sizeof(tmp))
+				n += snprintf(tmp + n, sizeof(tmp) - (size_t)n, " fav");
 			if (A.find && n > 0 && n < (int)sizeof(tmp))
 				n += snprintf(tmp + n, sizeof(tmp) - (size_t)n, " find=\"%s\" %d/%d%s%s", A.fq,
 					      A.find_n ? A.find_cur + 1 : 0, A.find_n, A.find_more ? "+" : "",
@@ -3797,8 +4167,12 @@ void app_describe(char *out, int cap)
 			     A.nrows ? A.rows[0].title : "");
 		break;
 	case S_HISTORY:
-		n = snprintf(tmp, sizeof(tmp), "history n=%d first=\"%s\"", A.nhist,
-			     A.nhist ? A.hist[0].title : "");
+		if (HTAB)
+			n = snprintf(tmp, sizeof(tmp), "favourites n=%d first=\"%s\"", A.nfav,
+				     A.nfav ? A.fav[0].title : "");
+		else
+			n = snprintf(tmp, sizeof(tmp), "history n=%d first=\"%s\"", A.nhist,
+				     A.nhist ? A.hist[0].title : "");
 		break;
 	case S_SECTIONS:
 		n = snprintf(tmp, sizeof(tmp), "sections n=%d top=%d", A.nsect, A.sect_top);

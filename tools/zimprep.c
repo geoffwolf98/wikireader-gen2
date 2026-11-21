@@ -628,6 +628,9 @@ int main(int argc, char **argv)
 		return 1;
 	placeholder(outdir, upname, ".HIS", 64);
 	placeholder(outdir, upname, ".EXT", 256);
+	/* favourites: room for 100 at their longest.  Leave NAME.FAV off the
+	 * card to switch favourites off for that wiki */
+	placeholder(outdir, upname, ".FAV", 32);
 	zim_close(&z);
 	host_files_close(&in);
 	fprintf(stderr, "done: copy %s/%s.* to the SD card (top folder or a folder of its own)\n", outdir, upname);

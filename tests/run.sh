@@ -608,6 +608,143 @@ EOF2
 		$R "$P/card.img" "$P/find.txt" "$P/state" > "$P/find.log" 2>&1 \
 			&& ok "find in article ($(basename "${R%% *}"))" || { bad "find in article ($(basename "${R%% *}"))"; grep FAIL "$P/find.log"; }
 	done
+	# favourites: the star at the top of the toolbar, newest first,
+	# starring again moves it to the top, the HISTORY list's tab is
+	# remembered, and a favourite is found by its address when the wiki
+	# has been rebuilt (entry numbers changed); gone: a message
+	cat > "$P/fav0.txt" <<'EOF2'
+type cattle
+tap 60 30
+tap 120 100
+tap 120 8
+expect article "Cattle"
+expectnot fav
+hold history 700
+tap 100 10
+expect history n=1
+wait 3000
+EOF2
+	cat > "$P/fav1.txt" <<'EOF2'
+button search
+button search
+type cattle
+tap 60 30
+tap 120 100
+tap 120 8
+expect article "Cattle"
+expect fav
+button search
+button search
+type plain
+tap 60 30
+expect article "Plain"
+tap 120 100
+tap 120 8
+expect fav
+hold history 700
+expect history n=2 first="Plain"
+tap 100 10
+expect favourites n=2 first="Plain"
+wait 3000
+EOF2
+	cat > "$P/fav2.txt" <<'EOF2'
+hold history 700
+expect favourites n=2 first="Plain"
+tap 60 49
+expect article "Cattle"
+expect fav
+tap 120 100
+tap 120 8
+expectnot fav
+tap 120 8
+expect fav
+hold history 700
+expect favourites n=2 first="Cattle"
+tap 30 10
+expect history
+tap 100 10
+tap 60 49
+expect article "Plain"
+button search
+button search
+type huge page
+tap 60 30
+tap 120 100
+tap 120 8
+expect fav
+drag 120 180 120 30 600
+wait 1000
+expectnot scroll=0/
+button search
+hold history 700
+expect favourites n=3 first="Huge page"
+tap 60 30
+expect article "Huge page"
+expectnot scroll=0/
+wait 3000
+EOF2
+	cat > "$P/fav3.txt" <<'EOF2'
+hold history 700
+expect favourites n=3 first="Huge page"
+tap 60 49
+expect article "Cattle"
+expect fav
+hold history 700
+tap 60 68
+expect message "Favourites"
+tap 120 100
+expect favourites n=2 first="Huge page"
+tap 30 10
+expect history n=5 first="Cattle"
+tap 60 49
+expect article "Huge page"
+hold history 700
+expect history n=5 first="Huge page"
+tap 60 87
+expect message "History"
+tap 120 100
+expect history n=4 first="Huge page"
+EOF2
+	for R in "$B/zimwiki-headless" "build/c33emu device/build/init.elf"; do
+		[ -x "${R%% *}" ] || continue
+		# no WIKI.FAV: no star, no Favourites tab
+		rm -rf "$P/favs"
+		if $R "$P/card.img" "$P/fav0.txt" "$P/favs" > "$P/fav.log" 2>&1 &&
+		   [ ! -e "$P/favs/WIKI/WIKI.FAV" ] &&
+		   head -c 32768 /dev/zero > "$P/favs/WIKI/WIKI.FAV" &&
+		   $R "$P/card.img" "$P/fav1.txt" "$P/favs" >> "$P/fav.log" 2>&1 &&
+		   $R "$P/card.img" "$P/fav2.txt" "$P/favs" >> "$P/fav.log" 2>&1 &&
+		   python3 - "$P/favs/WIKI/WIKI.FAV" <<'EOF2' &&
+# a rebuilt wiki: every entry number now wrong, and Plain gone from it
+import struct, sys
+f = sys.argv[1]; b = bytearray(open(f, 'rb').read())
+n = struct.unpack_from('<I', b, 4)[0]; p = 8
+for i in range(n):
+    struct.pack_into('<I', b, p, struct.unpack_from('<I', b, p)[0] + 1)
+    tl = b[p + 5]; ul = b[p + 6 + tl]
+    if b[p + 6:p + 6 + tl] == b'Plain':
+        b[p + 7 + tl] = ord('Q')
+    p += 7 + tl + ul
+open(f, 'wb').write(b)
+h = f[:-4] + '.HIS'; b = bytearray(open(h, 'rb').read())
+n = struct.unpack_from('<I', b, 4)[0]; p = 8; titles = []
+for i in range(n):
+    struct.pack_into('<I', b, p, struct.unpack_from('<I', b, p)[0] + 1)
+    tl = b[p + 8]; titles.append(bytes(b[p + 9:p + 9 + tl])); p += 9 + tl
+assert b[p:p + 4] == b'WZSA'; p += 4
+for i in range(n):
+    ul = b[p + 1]
+    if titles[i] == b'Plain':
+        b[p + 2] = ord('Q')
+    p += 2 + ul
+open(h, 'wb').write(b)
+EOF2
+		   $R "$P/card.img" "$P/fav3.txt" "$P/favs" >> "$P/fav.log" 2>&1; then
+			ok "favourites ($(basename "${R%% *}"))"
+		else
+			bad "favourites ($(basename "${R%% *}"))"; grep FAIL "$P/fav.log"
+		fi
+	done
 	# tap to stop: a tap while a page opens stops it and leaves you where
 	# you were (the old article kept, nothing added to history); at start
 	# it gives an empty search and the next start does not try the page

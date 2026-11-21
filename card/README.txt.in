@@ -28,7 +28,7 @@ Install
 Updating an existing card
 -------------------------
 Copy only init.app (and kernel.elf and WIKIFONT.BIN if they changed) over
-the old ones. Keep ZWSTATE.DAT and the .HIS and .EXT files in the wiki
+the old ones. Keep ZWSTATE.DAT and the .HIS, .EXT and .FAV files in the wiki
 folders: they hold your place and history. ZWSTATE.DAT is only for a new
 card.
 
@@ -36,6 +36,7 @@ Using it
 --------
 SEARCH          search screen, as you left it (press again to clear)
 HISTORY         short press: Back.  Hold: list of recent articles
+                (and Favourites tab, see Star)
 RANDOM          random article.  Hold: calculator (simple and
                 scientific; RANDOM again goes back to the article)
 Type            results update as you type, tap one to open it
@@ -47,6 +48,10 @@ Tap the page    toolbar: Back, List (sections), Top, Prev, Next, Find
 Find            find in the page: type, and the first match is shown
                 (its first letter inverted). Drag the page to put the
                 keyboard away; < > step through the matches, X stops
+Star            with the toolbar up, tap the star at the top to make
+                the article a favourite. Only for wikis with a NAME.FAV
+                (zimprep 1.0.54 makes it; for an older wiki:
+                head -c 32768 /dev/zero > NAME.FAV in its folder)
 Bottom left     tap the corner of an article to go Back
 Opening a page  tap the screen to stop and stay where you were (at
                 switch-on: an empty search instead of the last page)
